@@ -21,3 +21,5 @@ zephyr_link_libraries(${ESPNOW_BLOB})
 zephyr_ld_options(-Wl,--allow-multiple-definition)
 
 target_sources(app PRIVATE src/main.c)
+target_sources_ifdef(CONFIG_ESPNOW_NODE_ROLE_MASTER app PRIVATE
+                     src/ti_uart_link.c)

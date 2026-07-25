@@ -3,8 +3,64 @@
  * The upstream esp32c6_devkitc board defaults to 8 MiB.
  */
 
+#include <zephyr/dt-bindings/led/led.h>
+
+/ {
+	aliases {
+		led-strip = &onboard_rgb;
+		ti-uart = &uart1;
+	};
+};
+
+&pinctrl {
+	ti_uart_default: ti_uart_default {
+		group1 {
+			pinmux = <UART1_TX_GPIO5>;
+			output-high;
+		};
+
+		group2 {
+			pinmux = <UART1_RX_GPIO4>;
+			bias-pull-up;
+		};
+	};
+};
+
 &flash0 {
 	reg = <0x0 DT_SIZE_M(16)>;
 	ranges = <0x0 0x0 DT_SIZE_M(16)>;
 };
 
+&uart1 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&ti_uart_default>;
+	pinctrl-names = "default";
+};
+
+&i2s_default {
+	group1 {
+		pinmux = <I2S_O_SD_GPIO8>;
+	};
+};
+
+i2s_rgb: &i2s {
+	status = "okay";
+
+	dmas = <&dma 3>;
+	dma-names = "tx";
+
+	onboard_rgb: ws2812@0 {
+		compatible = "worldsemi,ws2812-i2s";
+		reg = <0>;
+		chain-length = <1>;
+		color-mapping = <LED_COLOR_ID_GREEN
+				 LED_COLOR_ID_RED
+				 LED_COLOR_ID_BLUE>;
+		reset-delay = <500>;
+	};
+};
+
+&dma {
+	status = "okay";
+};

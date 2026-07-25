@@ -1,4 +1,4 @@
 /build/
-/build-espnow/
+/build-espnow*/
 /.vscode/
 *.log

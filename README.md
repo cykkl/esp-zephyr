@@ -77,6 +77,14 @@ cd F:\dsai26\zephyresp
 `apps/espnow_peer` 是两块 ESP32-C6 的双向 ESP-NOW 测试程序。两块板使用
 同一份固件、固定 Wi-Fi 信道 6，每两秒互发心跳，无需路由器。
 
+当前主从分配和板载 RGB 指示如下：
+
+- `COM17`：主机，蓝色亮度 `8/255`
+- `COM19`：从机，蓝色亮度 `2/255`
+
+两块板的无线功能仍为双向收发，主从用于标识节点身份。亮度可在
+`apps/espnow_peer/Kconfig` 中调整。
+
 编译：
 
 ```powershell
@@ -88,6 +96,12 @@ cd F:\dsai26\zephyresp
 ```powershell
 .\scripts\flash-espnow-pair.ps1 -FirstPort COM17 -SecondPort COM19
 ```
+
+烧录脚本会把第一个端口烧录为主机，把第二个端口烧录为从机。
+
+主机还通过 UART1 与 TI MSPM0G3507 通信：GPIO5 为 ESP TX、GPIO4 为 ESP RX，
+默认 `115200, 8N1`。接线与文本协议见
+`apps/espnow_peer/TI_UART_PROTOCOL.md`。
 
 同步复位并监听两块板 12 秒：
 

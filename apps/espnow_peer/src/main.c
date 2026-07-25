@@ -11,13 +11,24 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/led_strip.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
 #include <esp_now.h>
 #include <esp_wifi.h>
 
+#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+#include "ti_uart_link.h"
+#endif
+
 LOG_MODULE_REGISTER(espnow_peer, LOG_LEVEL_INF);
+
+#define RGB_NODE DT_ALIAS(led_strip)
+
+static const struct device *const rgb_led = DEVICE_DT_GET(RGB_NODE);
 
 struct __packed espnow_heartbeat {
 	uint32_t sequence;
@@ -28,6 +39,41 @@ struct __packed espnow_heartbeat {
 static const uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {
 	0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
+
+static int set_role_indicator(void)
+{
+	struct led_rgb pixel = {
+		.r = 0,
+		.g = 0,
+#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+		.b = CONFIG_ESPNOW_MASTER_LED_BRIGHTNESS,
+#else
+		.b = CONFIG_ESPNOW_SLAVE_LED_BRIGHTNESS,
+#endif
+	};
+
+	if (!device_is_ready(rgb_led)) {
+		LOG_ERR("RGB LED device is not ready");
+		return -ENODEV;
+	}
+
+	const int error = led_strip_update_rgb(rgb_led, &pixel, 1);
+
+	if (error != 0) {
+		LOG_ERR("RGB LED update failed: %d", error);
+		return error;
+	}
+
+	LOG_INF("Role indicator=%s blue brightness=%u/255",
+#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+		"MASTER",
+#else
+		"SLAVE",
+#endif
+		pixel.b);
+
+	return 0;
+}
 
 #if defined(CONFIG_ESPNOW_ROLE_RECEIVER) || defined(CONFIG_ESPNOW_ROLE_BIDIR)
 static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *data, int length)
@@ -56,6 +102,17 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 			heartbeat->source_mac[0], heartbeat->source_mac[1],
 			heartbeat->source_mac[2], heartbeat->source_mac[3],
 			heartbeat->source_mac[4], heartbeat->source_mac[5]);
+
+#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+		const int uart_error =
+			ti_uart_link_report_espnow(heartbeat->sequence,
+						  info->rx_ctrl->rssi,
+						  heartbeat->source_mac);
+
+		if (uart_error != 0 && uart_error != -EAGAIN) {
+			LOG_WRN("TI UART event queue full: %d", uart_error);
+		}
+#endif
 	} else {
 		LOG_HEXDUMP_INF(data, MIN(length, 32), "RX payload");
 	}
@@ -136,6 +193,16 @@ int main(void)
 	wifi_mode_t current_mode;
 	uint8_t local_mac[ESP_NOW_ETH_ALEN];
 	esp_err_t error;
+
+	(void)set_role_indicator();
+
+#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+	const int uart_error = ti_uart_link_start();
+
+	if (uart_error != 0) {
+		LOG_WRN("Continuing without TI UART link");
+	}
+#endif
 
 	error = esp_wifi_get_mode(&current_mode);
 	if (error == ESP_ERR_WIFI_NOT_INIT) {
@@ -218,8 +285,13 @@ int main(void)
 		return -EIO;
 	}
 
-	LOG_INF("ESP-NOW v%u ready channel=%u role=%s",
+	LOG_INF("ESP-NOW v%u ready channel=%u node=%s radio=%s",
 		(unsigned int)version, CONFIG_ESPNOW_CHANNEL,
+#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+		"MASTER",
+#else
+		"SLAVE",
+#endif
 #if defined(CONFIG_ESPNOW_ROLE_SENDER)
 		"SENDER"
 #elif defined(CONFIG_ESPNOW_ROLE_RECEIVER)
@@ -244,4 +316,3 @@ int main(void)
 
 	return 0;
 }
-

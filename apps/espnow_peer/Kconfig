@@ -4,6 +4,47 @@ mainmenu "Waveshare ESP-NOW Peer"
 
 menu "ESP-NOW Configuration"
 
+choice ESPNOW_NODE_ROLE
+	prompt "Node identity"
+	default ESPNOW_NODE_ROLE_MASTER
+
+config ESPNOW_NODE_ROLE_MASTER
+	bool "Master"
+
+config ESPNOW_NODE_ROLE_SLAVE
+	bool "Slave"
+
+endchoice
+
+config ESPNOW_MASTER_LED_BRIGHTNESS
+	int "Master RGB LED brightness"
+	range 0 255
+	default 8
+
+config ESPNOW_SLAVE_LED_BRIGHTNESS
+	int "Slave RGB LED brightness"
+	range 0 255
+	default 2
+
+menu "TI UART Link"
+	depends on ESPNOW_NODE_ROLE_MASTER
+
+config TI_UART_BAUD_RATE
+	int "TI UART baud rate"
+	range 1200 3000000
+	default 115200
+	help
+	  Runtime baud rate for the ESP master UART1 connection to the TI MCU.
+
+config TI_UART_STATUS_INTERVAL_MS
+	int "Status message interval in milliseconds"
+	range 100 60000
+	default 1000
+	help
+	  Interval of the ESP,ALIVE status line sent to the TI MCU.
+
+endmenu
+
 choice ESPNOW_ROLE
 	prompt "Device role"
 	default ESPNOW_ROLE_BIDIR
@@ -35,4 +76,3 @@ config ESPNOW_BEACON_INTERVAL_S
 endmenu
 
 source "Kconfig.zephyr"
-
