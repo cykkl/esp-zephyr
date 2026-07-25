@@ -1,0 +1,49 @@
+/*
+ * Waveshare ESP32-C6-DEV-KIT-N16 application overlay.
+ *
+ * The connected board reports a 16 MiB SPI flash device. The upstream
+ * esp32c6_devkitc board definition uses the WROOM-N8 8 MiB description.
+ *
+ * The on-board addressable RGB LED is a single WS2812B connected to GPIO8.
+ */
+
+#include <zephyr/dt-bindings/led/led.h>
+
+/ {
+	aliases {
+		led-strip = &onboard_rgb;
+	};
+};
+
+&flash0 {
+	reg = <0x0 DT_SIZE_M(16)>;
+	ranges = <0x0 0x0 DT_SIZE_M(16)>;
+};
+
+&i2s_default {
+	group1 {
+		pinmux = <I2S_O_SD_GPIO8>;
+	};
+};
+
+i2s_rgb: &i2s {
+	status = "okay";
+
+	dmas = <&dma 3>;
+	dma-names = "tx";
+
+	onboard_rgb: ws2812@0 {
+		compatible = "worldsemi,ws2812-i2s";
+		reg = <0>;
+		chain-length = <1>;
+		color-mapping = <LED_COLOR_ID_GREEN
+				 LED_COLOR_ID_RED
+				 LED_COLOR_ID_BLUE>;
+		reset-delay = <500>;
+	};
+};
+
+&dma {
+	status = "okay";
+};
+
