@@ -11,24 +11,19 @@
 #include <stdbool.h>
 #include <string.h>
 
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
-#include <zephyr/drivers/led_strip.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
 #include <esp_now.h>
 #include <esp_wifi.h>
 
+#include "rgb_indicator.h"
+
 #if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
 #include "ti_uart_link.h"
 #endif
 
 LOG_MODULE_REGISTER(espnow_peer, LOG_LEVEL_INF);
-
-#define RGB_NODE DT_ALIAS(led_strip)
-
-static const struct device *const rgb_led = DEVICE_DT_GET(RGB_NODE);
 
 struct __packed espnow_heartbeat {
 	uint32_t sequence;
@@ -40,47 +35,14 @@ static const uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {
 	0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
 
-static int set_role_indicator(void)
-{
-	struct led_rgb pixel = {
-		.r = 0,
-		.g = 0,
-#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
-		.b = CONFIG_ESPNOW_MASTER_LED_BRIGHTNESS,
-#else
-		.b = CONFIG_ESPNOW_SLAVE_LED_BRIGHTNESS,
-#endif
-	};
-
-	if (!device_is_ready(rgb_led)) {
-		LOG_ERR("RGB LED device is not ready");
-		return -ENODEV;
-	}
-
-	const int error = led_strip_update_rgb(rgb_led, &pixel, 1);
-
-	if (error != 0) {
-		LOG_ERR("RGB LED update failed: %d", error);
-		return error;
-	}
-
-	LOG_INF("Role indicator=%s blue brightness=%u/255",
-#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
-		"MASTER",
-#else
-		"SLAVE",
-#endif
-		pixel.b);
-
-	return 0;
-}
-
 #if defined(CONFIG_ESPNOW_ROLE_RECEIVER) || defined(CONFIG_ESPNOW_ROLE_BIDIR)
 static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *data, int length)
 {
 	if (info == NULL || data == NULL || length <= 0 || info->rx_ctrl == NULL) {
 		return;
 	}
+
+	rgb_indicator_notify(RGB_INDICATOR_RX);
 
 	const uint8_t *source = info->src_addr;
 	const uint8_t *destination = info->des_addr;
@@ -129,6 +91,7 @@ static void send_callback(const esp_now_send_info_t *info, esp_now_send_status_t
 	const uint8_t *destination = info->des_addr;
 
 	if (status == ESP_NOW_SEND_SUCCESS) {
+		rgb_indicator_notify(RGB_INDICATOR_TX);
 		LOG_INF("TX OK -> %02x:%02x:%02x:%02x:%02x:%02x",
 			destination[0], destination[1], destination[2],
 			destination[3], destination[4], destination[5]);
@@ -194,7 +157,7 @@ int main(void)
 	uint8_t local_mac[ESP_NOW_ETH_ALEN];
 	esp_err_t error;
 
-	(void)set_role_indicator();
+	(void)rgb_indicator_start();
 
 #if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
 	const int uart_error = ti_uart_link_start();

@@ -26,6 +26,14 @@ config ESPNOW_SLAVE_LED_BRIGHTNESS
 	range 0 255
 	default 2
 
+config ESPNOW_LED_EVENT_DURATION_MS
+	int "ESP-NOW TX/RX color duration in milliseconds"
+	range 20 1000
+	default 180
+	help
+	  TX is shown in red and RX in green. Events are queued so both colors
+	  remain visible when transmit and receive happen close together.
+
 menu "TI UART Link"
 	depends on ESPNOW_NODE_ROLE_MASTER
 

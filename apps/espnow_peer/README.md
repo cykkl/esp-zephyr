@@ -13,11 +13,13 @@
 
 板载 RGB 使用同一种蓝色显示节点身份，避免颜色差异与状态含义混淆：
 
-- 主机：亮度 `8/255`
-- 从机：亮度 `2/255`
+- 待机：蓝色；主机亮度 `8/255`，从机亮度 `2/255`
+- ESP-NOW 发送成功：红色闪烁
+- ESP-NOW 收到数据：绿色闪烁
 
 亮度值可通过 `CONFIG_ESPNOW_MASTER_LED_BRIGHTNESS` 和
-`CONFIG_ESPNOW_SLAVE_LED_BRIGHTNESS` 修改。
+`CONFIG_ESPNOW_SLAVE_LED_BRIGHTNESS` 修改。通信颜色默认保持 180 ms，可通过
+`CONFIG_ESPNOW_LED_EVENT_DURATION_MS` 修改。发送和接收事件使用队列依次显示。
 
 本应用参考 Zephyr 官方 ESP-NOW 示例，并针对当前两块 16 MiB Flash 的
 Waveshare 板增加了 Devicetree 覆盖。
