@@ -72,6 +72,31 @@ cd F:\dsai26\zephyresp
 2. 让板载 RGB LED 每秒切换红、绿、蓝、白。
 3. 检测 BOOT 按键，按下时输出 `BOOT button pressed`。
 
+## ESP-NOW 双板通信
+
+`apps/espnow_peer` 是两块 ESP32-C6 的双向 ESP-NOW 测试程序。两块板使用
+同一份固件、固定 Wi-Fi 信道 6，每两秒互发心跳，无需路由器。
+
+编译：
+
+```powershell
+.\scripts\build-espnow.ps1 -Pristine
+```
+
+同时烧录当前连接的两块板：
+
+```powershell
+.\scripts\flash-espnow-pair.ps1 -FirstPort COM17 -SecondPort COM19
+```
+
+同步复位并监听两块板 12 秒：
+
+```powershell
+F:\zephyr\.venv\Scripts\python.exe .\scripts\monitor-pair.py COM17 COM19 --duration 12
+```
+
+日志中的 `RX heartbeat`、对方 MAC 地址和递增的 `seq` 可用于确认无线链路。
+
 ## 目录结构
 
 ```text
@@ -90,4 +115,3 @@ zephyresp/
 
 - 产品页面：https://docs.waveshare.net/ESP32-C6-DEV-KIT-N8/
 - 原理图：https://www.waveshare.net/w/upload/5/5a/ESP32-C6-DEV-KIT-N8.pdf
-

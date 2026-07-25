@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "Waveshare ESP-NOW Peer"
+
+menu "ESP-NOW Configuration"
+
+choice ESPNOW_ROLE
+	prompt "Device role"
+	default ESPNOW_ROLE_BIDIR
+
+config ESPNOW_ROLE_SENDER
+	bool "Sender"
+
+config ESPNOW_ROLE_RECEIVER
+	bool "Receiver"
+
+config ESPNOW_ROLE_BIDIR
+	bool "Both (send and receive)"
+
+endchoice
+
+config ESPNOW_CHANNEL
+	int "Wi-Fi channel"
+	range 1 13
+	default 6
+	help
+	  Both devices must use the same channel.
+
+config ESPNOW_BEACON_INTERVAL_S
+	int "Beacon interval in seconds"
+	range 1 60
+	default 2
+	depends on ESPNOW_ROLE_SENDER || ESPNOW_ROLE_BIDIR
+
+endmenu
+
+source "Kconfig.zephyr"
+

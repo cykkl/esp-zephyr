@@ -1,0 +1,10 @@
+/*
+ * The two connected Waveshare boards report 16 MiB SPI flash.
+ * The upstream esp32c6_devkitc board defaults to 8 MiB.
+ */
+
+&flash0 {
+	reg = <0x0 DT_SIZE_M(16)>;
+	ranges = <0x0 0x0 DT_SIZE_M(16)>;
+};
+
