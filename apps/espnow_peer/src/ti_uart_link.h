@@ -1,5 +1,5 @@
 /*
- * ESP master <-> TI MCU UART link.
+ * Car-side ESP <-> MSPM0G3507 UART link.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -9,9 +9,12 @@
 
 #include <stdint.h>
 
+#include "car_control_protocol.h"
+
 int ti_uart_link_start(void);
 
-int ti_uart_link_report_espnow(uint32_t sequence, int8_t rssi,
-			      const uint8_t source_mac[6]);
+int ti_uart_link_send_car_command(uint16_t sequence,
+				  enum car_command command,
+				  uint8_t speed);
 
 #endif

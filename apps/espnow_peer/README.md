@@ -34,17 +34,21 @@ Waveshare 板增加了 Devicetree 覆盖。
 F:\zephyr\.venv\Scripts\python.exe .\scripts\monitor-pair.py COM17 COM19 --duration 12
 ```
 
-当前测试固件为双向广播模式，固定使用信道 6，每两秒发送一次心跳。
+当前固件为双向广播模式，固定使用信道 6，每两秒发送一次链路心跳。
 编译脚本默认分别生成 `build-espnow-master` 和 `build-espnow-slave`。
 
-## 主机与 MSPM0G3507 串口
+## 小车控制链路
 
-主机额外启用 UART1 与 TI MSPM0G3507 通信：
+控制数据路径：
 
-- ESP GPIO5 / UART1 TX 接 TI UART RX
-- ESP GPIO4 / UART1 RX 接 TI UART TX
-- ESP GND 接 TI GND
-- 默认 `115200, 8N1`
+```text
+PC GUI → COM17/UART0 → 主 ESP → ESP-NOW → 从 ESP → UART1 → MSPM0G3507
+```
 
-UART0/COM17 继续用于 Zephyr 日志。详细文本协议见
-`TI_UART_PROTOCOL.md`，代码位于 `src/ti_uart_link.c`。
+- 主 ESP 从 PC 接收 STOP/FORWARD/BACKWARD/LEFT/RIGHT 和速度。
+- ESP-NOW 使用带 CRC16 的二进制控制帧。
+- 从 ESP 校验控制帧，再从 GPIO5 TX / GPIO4 RX 转发给 MSPM0G3507。
+- 运动中 700 ms 没有新命令，从 ESP 自动向 TI 发送 STOP。
+
+PC 程序见 `../../pc/README.md`，TI 串口接线与协议见
+`TI_UART_PROTOCOL.md`。

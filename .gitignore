@@ -2,3 +2,5 @@
 /build-espnow*/
 /.vscode/
 *.log
+__pycache__/
+*.pyc

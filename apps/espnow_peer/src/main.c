@@ -17,9 +17,12 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
+#include "car_control_protocol.h"
 #include "rgb_indicator.h"
 
 #if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+#include "pc_command_link.h"
+#else
 #include "ti_uart_link.h"
 #endif
 
@@ -34,6 +37,29 @@ struct __packed espnow_heartbeat {
 static const uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {
 	0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
+
+#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+static int forward_pc_command(uint16_t sequence, enum car_command command,
+			      uint8_t speed)
+{
+	struct car_control_packet packet;
+
+	car_control_packet_init(&packet, sequence, command, speed);
+
+	const esp_err_t error =
+		esp_now_send(broadcast_mac, (const uint8_t *)&packet,
+			     sizeof(packet));
+
+	if (error != ESP_OK) {
+		LOG_ERR("Control send failed: 0x%x", error);
+		return -EIO;
+	}
+
+	LOG_INF("Control TX seq=%u %s speed=%u",
+		sequence, car_command_name(command), packet.speed);
+	return 0;
+}
+#endif
 
 #if defined(CONFIG_ESPNOW_ROLE_RECEIVER) || defined(CONFIG_ESPNOW_ROLE_BIDIR)
 static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *data, int length)
@@ -54,7 +80,33 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 		source[0], source[1], source[2], source[3], source[4], source[5],
 		info->rx_ctrl->rssi, length);
 
-	if (length == sizeof(struct espnow_heartbeat)) {
+	if (length == sizeof(struct car_control_packet)) {
+		const struct car_control_packet *packet =
+			(const struct car_control_packet *)data;
+
+		if (!car_control_packet_is_valid(packet)) {
+			LOG_WRN("Rejected invalid car-control packet");
+			return;
+		}
+
+		const uint16_t sequence =
+			car_control_packet_sequence(packet);
+		const enum car_command command =
+			(enum car_command)packet->command;
+
+		LOG_INF("Control RX seq=%u %s speed=%u",
+			sequence, car_command_name(command), packet->speed);
+
+#if defined(CONFIG_ESPNOW_NODE_ROLE_SLAVE)
+		const int uart_error =
+			ti_uart_link_send_car_command(sequence, command,
+						      packet->speed);
+
+		if (uart_error != 0) {
+			LOG_ERR("Car UART queue failed: %d", uart_error);
+		}
+#endif
+	} else if (length == sizeof(struct espnow_heartbeat)) {
 		const struct espnow_heartbeat *heartbeat =
 			(const struct espnow_heartbeat *)data;
 
@@ -64,17 +116,6 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 			heartbeat->source_mac[0], heartbeat->source_mac[1],
 			heartbeat->source_mac[2], heartbeat->source_mac[3],
 			heartbeat->source_mac[4], heartbeat->source_mac[5]);
-
-#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
-		const int uart_error =
-			ti_uart_link_report_espnow(heartbeat->sequence,
-						  info->rx_ctrl->rssi,
-						  heartbeat->source_mac);
-
-		if (uart_error != 0 && uart_error != -EAGAIN) {
-			LOG_WRN("TI UART event queue full: %d", uart_error);
-		}
-#endif
 	} else {
 		LOG_HEXDUMP_INF(data, MIN(length, 32), "RX payload");
 	}
@@ -159,11 +200,11 @@ int main(void)
 
 	(void)rgb_indicator_start();
 
-#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+#if defined(CONFIG_ESPNOW_NODE_ROLE_SLAVE)
 	const int uart_error = ti_uart_link_start();
 
 	if (uart_error != 0) {
-		LOG_WRN("Continuing without TI UART link");
+		LOG_WRN("Continuing without car UART link");
 	}
 #endif
 
@@ -266,6 +307,15 @@ int main(void)
 	LOG_INF("Local MAC %02x:%02x:%02x:%02x:%02x:%02x",
 		local_mac[0], local_mac[1], local_mac[2],
 		local_mac[3], local_mac[4], local_mac[5]);
+
+#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+	const int pc_error = pc_command_link_start(forward_pc_command);
+
+	if (pc_error != 0) {
+		LOG_ERR("PC control link failed: %d", pc_error);
+		return pc_error;
+	}
+#endif
 
 #if defined(CONFIG_ESPNOW_ROLE_SENDER) || defined(CONFIG_ESPNOW_ROLE_BIDIR)
 	k_thread_create(&beacon_thread_data, beacon_stack,

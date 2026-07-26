@@ -34,8 +34,16 @@ config ESPNOW_LED_EVENT_DURATION_MS
 	  TX is shown in red and RX in green. Events are queued so both colors
 	  remain visible when transmit and receive happen close together.
 
+config CAR_CONTROL_TIMEOUT_MS
+	int "Car failsafe timeout in milliseconds"
+	range 200 5000
+	default 700
+	help
+	  The car-side ESP sends STOP to the TI MCU if no valid control command
+	  arrives within this period while the car is moving.
+
 menu "TI UART Link"
-	depends on ESPNOW_NODE_ROLE_MASTER
+	depends on ESPNOW_NODE_ROLE_SLAVE
 
 config TI_UART_BAUD_RATE
 	int "TI UART baud rate"
@@ -49,7 +57,7 @@ config TI_UART_STATUS_INTERVAL_MS
 	range 100 60000
 	default 1000
 	help
-	  Interval of the ESP,ALIVE status line sent to the TI MCU.
+	  Interval of the car-side ESP,ALIVE status line sent to the TI MCU.
 
 endmenu
 

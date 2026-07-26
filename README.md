@@ -74,8 +74,13 @@ cd F:\dsai26\zephyresp
 
 ## ESP-NOW 双板通信
 
-`apps/espnow_peer` 是两块 ESP32-C6 的双向 ESP-NOW 测试程序。两块板使用
-同一份固件、固定 Wi-Fi 信道 6，每两秒互发心跳，无需路由器。
+`apps/espnow_peer` 实现 PC 到小车的无线控制链路：
+
+```text
+PC → COM17 → 主 ESP → ESP-NOW → 从 ESP → UART1 → MSPM0G3507
+```
+
+固定使用 Wi-Fi 信道 6，无需路由器，并保留每两秒一次的双向链路心跳。
 
 当前主从分配和板载 RGB 指示如下：
 
@@ -84,8 +89,8 @@ cd F:\dsai26\zephyresp
 - ESP-NOW 发送成功：闪红色
 - ESP-NOW 收到数据：闪绿色
 
-两块板的无线功能仍为双向收发，主从用于标识节点身份。亮度可在
-`apps/espnow_peer/Kconfig` 中调整。
+COM17 主机接 PC；COM19 从机安装在小车上并通过 UART1 接 MSPM0G3507。
+亮度和控制超时可在 `apps/espnow_peer/Kconfig` 中调整。
 
 编译：
 
@@ -101,9 +106,18 @@ cd F:\dsai26\zephyresp
 
 烧录脚本会把第一个端口烧录为主机，把第二个端口烧录为从机。
 
-主机还通过 UART1 与 TI MSPM0G3507 通信：GPIO5 为 ESP TX、GPIO4 为 ESP RX，
-默认 `115200, 8N1`。接线与文本协议见
+小车端从机通过 UART1 与 TI MSPM0G3507 通信：GPIO5 为 ESP TX、GPIO4 为
+ESP RX，默认 `115200, 8N1`。接线与文本协议见
 `apps/espnow_peer/TI_UART_PROTOCOL.md`。
+
+启动 PC 控制界面：
+
+```powershell
+.\scripts\start-car-controller.ps1 -Port COM17
+```
+
+操作说明见 `pc/README.md`。运动命令每 200 ms 刷新；小车端连续 700 ms 没有
+有效命令会自动向 TI 发送 STOP。
 
 同步复位并监听两块板 12 秒：
 
@@ -119,6 +133,7 @@ F:\zephyr\.venv\Scripts\python.exe .\scripts\monitor-pair.py COM17 COM19 --durat
 zephyresp/
 ├── boards/       Devicetree 板级覆盖
 ├── docs/         厂商引脚图和原理图
+├── pc/           Windows 小车控制程序
 ├── scripts/      编译、烧录、串口和端口检测脚本
 ├── src/          C 源码
 ├── build/        本地构建结果（由脚本生成）

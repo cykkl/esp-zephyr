@@ -1,15 +1,17 @@
 /*
- * ESP master <-> TI MCU UART link.
+ * Car-side ESP <-> MSPM0G3507 UART link.
  *
- * Line protocol (115200 8N1 by default):
- *   ESP -> TI: ESP,READY,MASTER,<baud>
- *   ESP -> TI: ESP,ALIVE,<sequence>,<uptime_ms>
- *   ESP -> TI: ESP,ESPNOW_RX,<sequence>,<rssi>,<source_mac>
- *   TI  -> ESP: PING
- *   TI  -> ESP: STATUS
- *   TI  -> ESP: ECHO,<text>
+ * ESP -> TI:
+ *   CAR,CMD,<sequence>,<command>,<speed>
+ *   ESP,READY,CAR_NODE,<baud>
+ *   ESP,ALIVE,<uptime_ms>
  *
- * Every message ends with CRLF.
+ * TI -> ESP:
+ *   PING
+ *   STATUS
+ *   ECHO,<text>
+ *
+ * Every line ends with CRLF.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -36,19 +38,23 @@ LOG_MODULE_REGISTER(ti_uart_link, LOG_LEVEL_INF);
 #define TI_TX_LINE_SIZE 160
 #define TI_UART_STACK_SIZE 2048
 #define TI_UART_PRIORITY 5
-#define ESPNOW_MAC_LENGTH 6
 
-struct espnow_rx_event {
-	uint32_t sequence;
-	int8_t rssi;
-	uint8_t source_mac[ESPNOW_MAC_LENGTH];
+struct car_command_event {
+	uint16_t sequence;
+	uint8_t command;
+	uint8_t speed;
 };
 
 static const struct device *const ti_uart = DEVICE_DT_GET(TI_UART_NODE);
 static bool link_started;
+static bool command_received;
+static uint16_t current_sequence;
+static enum car_command current_command = CAR_COMMAND_STOP;
+static uint8_t current_speed;
+static int64_t last_command_time;
 
 K_MUTEX_DEFINE(ti_tx_mutex);
-K_MSGQ_DEFINE(espnow_rx_events, sizeof(struct espnow_rx_event), 8, 4);
+K_MSGQ_DEFINE(car_commands, sizeof(struct car_command_event), 8, 4);
 K_THREAD_STACK_DEFINE(ti_uart_stack, TI_UART_STACK_SIZE);
 static struct k_thread ti_uart_thread_data;
 
@@ -56,24 +62,42 @@ static void ti_uart_write_line(const char *format, ...)
 {
 	char line[TI_TX_LINE_SIZE];
 	va_list args;
-	int length;
 
 	va_start(args, format);
-	length = vsnprintk(line, sizeof(line), format, args);
+	const int length = vsnprintk(line, sizeof(line), format, args);
 	va_end(args);
 
-	if (length < 0) {
+	if (length <= 0) {
 		return;
 	}
 
-	const size_t bytes =
-		MIN((size_t)length, sizeof(line) - 1U);
+	const size_t bytes = MIN((size_t)length, sizeof(line) - 1U);
 
 	k_mutex_lock(&ti_tx_mutex, K_FOREVER);
 	for (size_t index = 0; index < bytes; index++) {
 		uart_poll_out(ti_uart, line[index]);
 	}
 	k_mutex_unlock(&ti_tx_mutex);
+}
+
+static void send_command_to_ti(uint16_t sequence, enum car_command command,
+			       uint8_t speed)
+{
+	if (command == CAR_COMMAND_STOP) {
+		speed = 0U;
+	}
+
+	ti_uart_write_line("CAR,CMD,%u,%s,%u\r\n",
+			   sequence, car_command_name(command), speed);
+
+	current_sequence = sequence;
+	current_command = command;
+	current_speed = speed;
+	last_command_time = k_uptime_get();
+	command_received = true;
+
+	LOG_INF("TI command seq=%u %s speed=%u",
+		sequence, car_command_name(command), speed);
 }
 
 static void handle_ti_command(char *line)
@@ -84,8 +108,10 @@ static void handle_ti_command(char *line)
 		ti_uart_write_line("ESP,PONG,%" PRIu32 "\r\n",
 				   k_uptime_get_32());
 	} else if (strcmp(line, "STATUS") == 0) {
-		ti_uart_write_line("ESP,STATUS,MASTER,%" PRIu32 "\r\n",
-				   k_uptime_get_32());
+		ti_uart_write_line("ESP,STATUS,CAR_NODE,%u,%s,%u\r\n",
+				   current_sequence,
+				   car_command_name(current_command),
+				   current_speed);
 	} else if (strncmp(line, "ECHO,", 5) == 0) {
 		ti_uart_write_line("ESP,ECHO,%s\r\n", line + 5);
 	} else {
@@ -129,7 +155,6 @@ static void ti_uart_thread(void *unused1, void *unused2, void *unused3)
 	char line[TI_RX_LINE_SIZE];
 	size_t line_length = 0U;
 	bool overflow = false;
-	uint32_t alive_sequence = 0U;
 	int64_t next_alive = k_uptime_get();
 
 	ARG_UNUSED(unused1);
@@ -137,30 +162,32 @@ static void ti_uart_thread(void *unused1, void *unused2, void *unused3)
 	ARG_UNUSED(unused3);
 
 	k_thread_name_set(k_current_get(), "ti_uart");
-	ti_uart_write_line("ESP,READY,MASTER,%d\r\n",
+	ti_uart_write_line("ESP,READY,CAR_NODE,%d\r\n",
 			   CONFIG_TI_UART_BAUD_RATE);
 
 	while (true) {
-		struct espnow_rx_event event;
+		struct car_command_event event;
 
 		read_ti_uart(line, &line_length, &overflow);
 
-		while (k_msgq_get(&espnow_rx_events, &event, K_NO_WAIT) == 0) {
-			ti_uart_write_line(
-				"ESP,ESPNOW_RX,%" PRIu32 ",%d,"
-				"%02x:%02x:%02x:%02x:%02x:%02x\r\n",
-				event.sequence, event.rssi,
-				event.source_mac[0], event.source_mac[1],
-				event.source_mac[2], event.source_mac[3],
-				event.source_mac[4], event.source_mac[5]);
+		while (k_msgq_get(&car_commands, &event, K_NO_WAIT) == 0) {
+			send_command_to_ti(event.sequence,
+					   (enum car_command)event.command,
+					   event.speed);
 		}
 
 		const int64_t now = k_uptime_get();
 
+		if (command_received && current_command != CAR_COMMAND_STOP &&
+		    now - last_command_time >= CONFIG_CAR_CONTROL_TIMEOUT_MS) {
+			send_command_to_ti(current_sequence,
+					   CAR_COMMAND_STOP, 0U);
+			LOG_WRN("Control timeout: failsafe STOP");
+		}
+
 		if (now >= next_alive) {
-			ti_uart_write_line("ESP,ALIVE,%" PRIu32 ",%" PRIu32
-					   "\r\n",
-					   alive_sequence++, k_uptime_get_32());
+			ti_uart_write_line("ESP,ALIVE,%" PRIu32 "\r\n",
+					   k_uptime_get_32());
 			next_alive = now + CONFIG_TI_UART_STATUS_INTERVAL_MS;
 		}
 
@@ -195,23 +222,30 @@ int ti_uart_link_start(void)
 			ti_uart_thread, NULL, NULL, NULL,
 			TI_UART_PRIORITY, 0, K_NO_WAIT);
 
-	LOG_INF("TI UART ready: UART1 GPIO5 TX / GPIO4 RX, %d 8N1",
+	LOG_INF("Car UART ready: UART1 GPIO5 TX / GPIO4 RX, %d 8N1",
 		CONFIG_TI_UART_BAUD_RATE);
+	LOG_INF("Car failsafe timeout=%d ms",
+		CONFIG_CAR_CONTROL_TIMEOUT_MS);
 	return 0;
 }
 
-int ti_uart_link_report_espnow(uint32_t sequence, int8_t rssi,
-			      const uint8_t source_mac[ESPNOW_MAC_LENGTH])
+int ti_uart_link_send_car_command(uint16_t sequence,
+				  enum car_command command,
+				  uint8_t speed)
 {
 	if (!link_started) {
 		return -EAGAIN;
 	}
 
-	struct espnow_rx_event event = {
+	if (command > CAR_COMMAND_RIGHT || speed > CAR_MAX_SPEED) {
+		return -EINVAL;
+	}
+
+	const struct car_command_event event = {
 		.sequence = sequence,
-		.rssi = rssi,
+		.command = (uint8_t)command,
+		.speed = command == CAR_COMMAND_STOP ? 0U : speed,
 	};
 
-	memcpy(event.source_mac, source_mac, sizeof(event.source_mac));
-	return k_msgq_put(&espnow_rx_events, &event, K_NO_WAIT);
+	return k_msgq_put(&car_commands, &event, K_NO_WAIT);
 }

@@ -24,4 +24,6 @@ target_sources(app PRIVATE
                src/main.c
                src/rgb_indicator.c)
 target_sources_ifdef(CONFIG_ESPNOW_NODE_ROLE_MASTER app PRIVATE
+                     src/pc_command_link.c)
+target_sources_ifdef(CONFIG_ESPNOW_NODE_ROLE_SLAVE app PRIVATE
                      src/ti_uart_link.c)
