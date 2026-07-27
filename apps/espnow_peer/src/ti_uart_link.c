@@ -51,6 +51,12 @@ struct car_command_event {
 	uint8_t speed;
 };
 
+struct car_parameter_event {
+	uint16_t sequence;
+	uint8_t parameter;
+	int32_t value;
+};
+
 static const struct device *const ti_uart = DEVICE_DT_GET(TI_UART_NODE);
 static bool link_started;
 static bool command_received;
@@ -62,6 +68,7 @@ static ti_telemetry_handler_t telemetry_handler;
 
 K_MUTEX_DEFINE(ti_tx_mutex);
 K_MSGQ_DEFINE(car_commands, sizeof(struct car_command_event), 8, 4);
+K_MSGQ_DEFINE(car_parameters, sizeof(struct car_parameter_event), 8, 4);
 K_MSGQ_DEFINE(imu_samples, sizeof(struct car_imu_sample), 8, 4);
 K_THREAD_STACK_DEFINE(ti_uart_stack, TI_UART_STACK_SIZE);
 static struct k_thread ti_uart_thread_data;
@@ -128,6 +135,23 @@ static void send_command_to_ti(uint16_t sequence, enum car_command command,
 
 	LOG_INF("TI command seq=%u %s speed=%u",
 		sequence, car_command_name(command), speed);
+}
+
+static void send_parameter_to_ti(uint16_t sequence,
+				 enum car_parameter parameter,
+				 int32_t value)
+{
+	uint8_t payload[CAR_SERIAL_PARAMETER_PAYLOAD_SIZE];
+	uint8_t frame[CAR_SERIAL_MAX_FRAME_SIZE];
+
+	payload[0] = (uint8_t)parameter;
+	sys_put_le32((uint32_t)value, &payload[1]);
+	const size_t length = car_serial_encode(
+		frame, sizeof(frame), CAR_SERIAL_TYPE_PARAMETER, sequence,
+		payload, sizeof(payload));
+	ti_uart_write_bytes(frame, length);
+	LOG_INF("TI parameter seq=%u id=%u value=%" PRId32,
+		sequence, (unsigned int)parameter, value);
 }
 
 /*
@@ -343,6 +367,42 @@ static void handle_ti_frame(const uint8_t *frame, size_t length)
 			.left_duty = (int8_t)payload[22],
 			.right_duty = (int8_t)payload[23],
 			.tracking_enabled = payload[24],
+			.line_bits = payload[25],
+			.line_error = (int8_t)payload[26],
+			.line_active = payload[27],
+			.track_state = payload[28],
+			.line_correction = (int8_t)payload[29],
+			.target_left_cps =
+				(int16_t)sys_get_le16(&payload[30]),
+			.target_right_cps =
+				(int16_t)sys_get_le16(&payload[32]),
+			.measured_left_cps =
+				(int16_t)sys_get_le16(&payload[34]),
+			.measured_right_cps =
+				(int16_t)sys_get_le16(&payload[36]),
+			.base_speed = payload[38],
+			.motor_limit = payload[39],
+			.motor_minimum = payload[40],
+			.output_slew = payload[41],
+			.kp_percent = sys_get_le16(&payload[42]),
+			.kd_percent = sys_get_le16(&payload[44]),
+			.gyro_percent = sys_get_le16(&payload[46]),
+			.speed_full_scale_cps =
+				sys_get_le16(&payload[48]),
+			.speed_kp_percent = sys_get_le16(&payload[50]),
+			.speed_ki_percent = sys_get_le16(&payload[52]),
+			.heading_kp_percent = sys_get_le16(&payload[54]),
+			.heading_ki_percent = sys_get_le16(&payload[56]),
+			.heading_kd_percent = sys_get_le16(&payload[58]),
+			.heading_limit = payload[60],
+			.turn_speed = payload[61],
+			.turn_angle_deg = payload[62],
+			.turn_tolerance_deg = payload[63],
+			.turn_sign = (int8_t)payload[64],
+			.turn_detect_cycles = payload[65],
+			.imu_age_ms = sys_get_le16(&payload[66]),
+			.line_trim_limit = payload[68],
+			.heading_sign = (int8_t)payload[69],
 		};
 		if (sample.tracking_enabled > 1U) {
 			LOG_WRN("Rejected TI telemetry tracking flag");
@@ -443,6 +503,7 @@ static void ti_uart_thread(void *unused1, void *unused2, void *unused3)
 
 	while (true) {
 		struct car_command_event event;
+		struct car_parameter_event parameter_event;
 		struct car_imu_sample imu_sample;
 
 		read_ti_uart(line, &line_length, &overflow);
@@ -451,6 +512,13 @@ static void ti_uart_thread(void *unused1, void *unused2, void *unused3)
 			send_command_to_ti(event.sequence,
 					   (enum car_command)event.command,
 					   event.speed);
+		}
+		while (k_msgq_get(&car_parameters, &parameter_event,
+				  K_NO_WAIT) == 0) {
+			send_parameter_to_ti(
+				parameter_event.sequence,
+				(enum car_parameter)parameter_event.parameter,
+				parameter_event.value);
 		}
 		while (k_msgq_get(&imu_samples, &imu_sample, K_NO_WAIT) == 0) {
 			send_imu_to_ti(&imu_sample);
@@ -543,4 +611,22 @@ int ti_uart_link_send_imu(const struct car_imu_sample *sample)
 		return -EINVAL;
 	}
 	return k_msgq_put(&imu_samples, sample, K_NO_WAIT);
+}
+
+int ti_uart_link_send_parameter(uint16_t sequence,
+				enum car_parameter parameter,
+				int32_t value)
+{
+	if (!link_started) {
+		return -EAGAIN;
+	}
+	if (parameter >= CAR_PARAM_COUNT) {
+		return -EINVAL;
+	}
+	const struct car_parameter_event event = {
+		.sequence = sequence,
+		.parameter = (uint8_t)parameter,
+		.value = value,
+	};
+	return k_msgq_put(&car_parameters, &event, K_NO_WAIT);
 }

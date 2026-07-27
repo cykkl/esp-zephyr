@@ -64,6 +64,25 @@ static int forward_pc_command(uint16_t sequence, enum car_command command,
 		sequence, car_command_name(command), packet.speed);
 	return 0;
 }
+
+static int forward_pc_parameter(uint16_t sequence,
+				enum car_parameter parameter,
+				int32_t value)
+{
+	struct car_parameter_packet packet;
+
+	car_parameter_packet_init(&packet, sequence, parameter, value);
+	const esp_err_t error =
+		esp_now_send(broadcast_mac, (const uint8_t *)&packet,
+			     sizeof(packet));
+	if (error != ESP_OK) {
+		LOG_ERR("Parameter send failed: 0x%x", error);
+		return -EIO;
+	}
+	LOG_INF("Parameter TX seq=%u id=%u value=%" PRId32,
+		sequence, (unsigned int)parameter, value);
+	return 0;
+}
 #endif
 
 #if defined(CONFIG_ESPNOW_NODE_ROLE_SLAVE)
@@ -130,6 +149,23 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 
 		if (uart_error != 0) {
 			LOG_ERR("Car UART queue failed: %d", uart_error);
+		}
+#endif
+	} else if (length == sizeof(struct car_parameter_packet)) {
+		const struct car_parameter_packet *packet =
+			(const struct car_parameter_packet *)data;
+
+		if (!car_parameter_packet_is_valid(packet)) {
+			LOG_WRN("Rejected invalid parameter packet");
+			return;
+		}
+#if defined(CONFIG_ESPNOW_NODE_ROLE_SLAVE)
+		const int uart_error = ti_uart_link_send_parameter(
+			sys_get_le16(packet->sequence_le),
+			(enum car_parameter)packet->parameter,
+			(int32_t)sys_get_le32(packet->value_le));
+		if (uart_error != 0) {
+			LOG_ERR("Parameter UART queue failed: %d", uart_error);
 		}
 #endif
 	} else if (length == sizeof(struct car_telemetry_packet)) {
@@ -385,7 +421,8 @@ int main(void)
 		local_mac[3], local_mac[4], local_mac[5]);
 
 #if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
-	const int pc_error = pc_command_link_start(forward_pc_command);
+	const int pc_error = pc_command_link_start(
+		forward_pc_command, forward_pc_parameter);
 
 	if (pc_error != 0) {
 		LOG_ERR("PC control link failed: %d", pc_error);

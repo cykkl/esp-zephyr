@@ -22,6 +22,10 @@ int ti_uart_link_send_car_command(uint16_t sequence,
 				  enum car_command command,
 				  uint8_t speed);
 
+int ti_uart_link_send_parameter(uint16_t sequence,
+				enum car_parameter parameter,
+				int32_t value);
+
 int ti_uart_link_send_imu(const struct car_imu_sample *sample);
 
 #endif

@@ -31,7 +31,7 @@ WitMotion JY61P 使用车载 ESP 的 UART0，参数为 `115200 8N1`。从机 ESP
 | 偏移 | 长度 | 字段 |
 | ---: | ---: | --- |
 | 0 | 2 | 同步头 `A5 5A` |
-| 2 | 1 | 协议版本，当前为 `2` |
+| 2 | 1 | 协议版本，当前为 `3` |
 | 3 | 1 | 消息类型 |
 | 4 | 1 | 负载长度 |
 | 5 | 2 | 16 位序号 |
@@ -39,7 +39,7 @@ WitMotion JY61P 使用车载 ESP 的 UART0，参数为 `115200 8N1`。从机 ESP
 | 7+N | 2 | CRC16-CCITT |
 
 CRC 初值为 `0xFFFF`、多项式为 `0x1021`，计算范围从版本字段到负载末尾，
-不包含同步头和 CRC 字段。最大负载 25 字节，最大完整帧 34 字节。
+不包含同步头和 CRC 字段。最大负载 70 字节，最大完整帧 79 字节。
 
 ## 消息类型
 
@@ -61,7 +61,7 @@ flags。角速度单位为 `0.1°/s`，姿态角单位为 `0.01°`；flags bit0 
 flags[7:2] 为故障码。车载 ESP 在 80 ms 内没有同时收到新角速度帧和姿态角
 帧时撤销有效位，避免重复转发冻结数据。
 
-### `0x03` TELEMETRY，负载 25 字节
+### `0x03` TELEMETRY，负载 70 字节
 
 依次为：
 
@@ -71,7 +71,11 @@ flags[7:2] 为故障码。车载 ESP 在 80 ms 内没有同时收到新角速度
 - `flags`：1 字节；
 - `heading_target/heading_error`：两个有符号 16 位，单位 `0.01°`；
 - `correction/left/right`：三个有符号 8 位；
-- `tracking`：0 或 1。
+- `tracking`：0 或 1；
+- `line_bits/line_error/line_active/track_state/line_correction`：灰度阵列与状态机；
+- `target_left/right_cps`、`measured_left/right_cps`：编码器目标和实测速度；
+- `base/limit/minimum/slew` 与循迹、速度环、航向环和转弯参数；
+- `imu_age_ms`：3507 看到的 IMU 样本年龄。
 
 MSPM0 每 20 ms 发送一帧。车载 ESP 校验后转换为 ESP-NOW 遥测包，基站 ESP
 再将同格式二进制串口帧交给 PC。
@@ -79,6 +83,12 @@ MSPM0 每 20 ms 发送一帧。车载 ESP 校验后转换为 ESP-NOW 遥测包�
 ### `0x04` ACK，负载 3 字节
 
 负载依次为命令、速度和状态：0=成功、1=坏帧、2=非法命令、3=队列满。
+
+### `0x05` PARAMETER，负载 5 字节
+
+负载为 1 字节参数编号和 4 字节有符号值。PC 将参数帧交给基站 ESP，经
+ESP-NOW 和车载 ESP 原样下发至 MSPM0；是否生效由下一帧 TELEMETRY 中回传的
+当前参数确认。
 
 ## 兼容性
 

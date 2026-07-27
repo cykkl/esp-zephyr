@@ -35,6 +35,7 @@ LOG_MODULE_REGISTER(pc_command_link, LOG_LEVEL_INF);
 
 static const struct device *const pc_uart = DEVICE_DT_GET(PC_UART_NODE);
 static pc_command_handler_t command_handler;
+static pc_parameter_handler_t parameter_handler;
 
 K_MUTEX_DEFINE(pc_tx_mutex);
 K_MSGQ_DEFINE(pc_telemetry, sizeof(struct car_telemetry_sample), 8, 4);
@@ -94,11 +95,28 @@ static void handle_pc_frame(const uint8_t *frame, size_t length)
 {
 	const uint16_t sequence = car_serial_sequence(frame);
 	const uint8_t *payload = car_serial_const_payload(frame);
+
+	if (!car_serial_frame_valid(frame, length)) {
+		LOG_WRN("Rejected invalid PC frame");
+		return;
+	}
+	if (frame[3] == CAR_SERIAL_TYPE_PARAMETER) {
+		const enum car_parameter parameter =
+			(enum car_parameter)payload[0];
+		const int32_t value = (int32_t)sys_get_le32(&payload[1]);
+		const int error = parameter_handler(
+			sequence, parameter, value);
+
+		pc_write_line(error == 0
+				      ? "ESP,PARAM,%u,%u,%" PRId32 ",QUEUED\r\n"
+				      : "ESP,PARAM,%u,%u,%" PRId32 ",ERROR\r\n",
+			      sequence, (unsigned int)parameter, value);
+		return;
+	}
+
 	const enum car_command command = (enum car_command)payload[0];
 	uint8_t speed = payload[1];
-
-	if (!car_serial_frame_valid(frame, length) ||
-	    frame[3] != CAR_SERIAL_TYPE_COMMAND ||
+	if (frame[3] != CAR_SERIAL_TYPE_COMMAND ||
 	    command > CAR_COMMAND_TRACK_OFF || speed > CAR_MAX_SPEED ||
 	    (car_command_is_tracking(command) && speed != 0U) ||
 	    (command == CAR_COMMAND_STOP && speed != 0U)) {
@@ -318,6 +336,45 @@ static void pc_thread(void *unused1, void *unused2, void *unused3)
 			payload[22] = (uint8_t)telemetry.left_duty;
 			payload[23] = (uint8_t)telemetry.right_duty;
 			payload[24] = telemetry.tracking_enabled;
+			payload[25] = telemetry.line_bits;
+			payload[26] = (uint8_t)telemetry.line_error;
+			payload[27] = telemetry.line_active;
+			payload[28] = telemetry.track_state;
+			payload[29] = (uint8_t)telemetry.line_correction;
+			sys_put_le16((uint16_t)telemetry.target_left_cps,
+				     &payload[30]);
+			sys_put_le16((uint16_t)telemetry.target_right_cps,
+				     &payload[32]);
+			sys_put_le16((uint16_t)telemetry.measured_left_cps,
+				     &payload[34]);
+			sys_put_le16((uint16_t)telemetry.measured_right_cps,
+				     &payload[36]);
+			payload[38] = telemetry.base_speed;
+			payload[39] = telemetry.motor_limit;
+			payload[40] = telemetry.motor_minimum;
+			payload[41] = telemetry.output_slew;
+			sys_put_le16(telemetry.kp_percent, &payload[42]);
+			sys_put_le16(telemetry.kd_percent, &payload[44]);
+			sys_put_le16(telemetry.gyro_percent, &payload[46]);
+			sys_put_le16(telemetry.speed_full_scale_cps,
+				     &payload[48]);
+			sys_put_le16(telemetry.speed_kp_percent, &payload[50]);
+			sys_put_le16(telemetry.speed_ki_percent, &payload[52]);
+			sys_put_le16(telemetry.heading_kp_percent,
+				     &payload[54]);
+			sys_put_le16(telemetry.heading_ki_percent,
+				     &payload[56]);
+			sys_put_le16(telemetry.heading_kd_percent,
+				     &payload[58]);
+			payload[60] = telemetry.heading_limit;
+			payload[61] = telemetry.turn_speed;
+			payload[62] = telemetry.turn_angle_deg;
+			payload[63] = telemetry.turn_tolerance_deg;
+			payload[64] = (uint8_t)telemetry.turn_sign;
+			payload[65] = telemetry.turn_detect_cycles;
+			sys_put_le16(telemetry.imu_age_ms, &payload[66]);
+			payload[68] = telemetry.line_trim_limit;
+			payload[69] = (uint8_t)telemetry.heading_sign;
 			const size_t frame_size = car_serial_encode(
 				frame_out, sizeof(frame_out),
 				CAR_SERIAL_TYPE_TELEMETRY, telemetry.sequence,
@@ -329,9 +386,10 @@ static void pc_thread(void *unused1, void *unused2, void *unused3)
 	}
 }
 
-int pc_command_link_start(pc_command_handler_t handler)
+int pc_command_link_start(pc_command_handler_t command_callback,
+			  pc_parameter_handler_t parameter_callback)
 {
-	if (handler == NULL) {
+	if (command_callback == NULL || parameter_callback == NULL) {
 		return -EINVAL;
 	}
 
@@ -340,7 +398,8 @@ int pc_command_link_start(pc_command_handler_t handler)
 		return -ENODEV;
 	}
 
-	command_handler = handler;
+	command_handler = command_callback;
+	parameter_handler = parameter_callback;
 	k_thread_create(&pc_thread_data, pc_thread_stack,
 			K_THREAD_STACK_SIZEOF(pc_thread_stack),
 			pc_thread, NULL, NULL, NULL,

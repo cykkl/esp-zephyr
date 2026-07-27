@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import queue
 import re
@@ -11,7 +12,9 @@ import struct
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox
+from collections import deque
+from tkinter import filedialog, messagebox
+from typing import Any
 
 import serial
 
@@ -27,13 +30,106 @@ COMMANDS = (
 )
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 FRAME_SYNC = b"\xA5\x5A"
-FRAME_VERSION = 2
+FRAME_VERSION = 3
 FRAME_TYPE_COMMAND = 1
 FRAME_TYPE_TELEMETRY = 3
 FRAME_TYPE_ACK = 4
+FRAME_TYPE_PARAMETER = 5
 FRAME_HEADER_SIZE = 7
-FRAME_MAX_PAYLOAD = 25
+FRAME_MAX_PAYLOAD = 70
 COMMAND_IDS = {name: index for index, name in enumerate(COMMANDS)}
+PARAMETER_IDS = {
+    "BASE": 0,
+    "LIMIT": 1,
+    "MINIMUM": 2,
+    "SLEW": 3,
+    "KP": 4,
+    "KD": 5,
+    "GYRO": 6,
+    "SPEED_FULL_SCALE": 9,
+    "SPEED_KP": 10,
+    "SPEED_KI": 11,
+    "HEADING_KP": 12,
+    "HEADING_KI": 13,
+    "HEADING_KD": 14,
+    "HEADING_LIMIT": 15,
+    "HEADING_SIGN": 16,
+    "TURN_SPEED": 17,
+    "TURN_ANGLE": 18,
+    "TURN_TOLERANCE": 19,
+    "TURN_DETECT_CYCLES": 20,
+    "TURN_SIGN": 21,
+    "LINE_TRIM_LIMIT": 22,
+}
+TRACK_STATES = (
+    "STOP",
+    "FORWARD",
+    "LINE_LEFT",
+    "LINE_RIGHT",
+    "TURN_LEFT",
+    "TURN_RIGHT",
+    "LINE_STOP",
+    "LOST",
+    "OBSTACLE",
+    "SENSOR_FAULT",
+    "TURN_TIMEOUT",
+    "MANUAL",
+)
+
+
+def decode_telemetry(payload: bytes, sequence: int) -> dict[str, Any]:
+    """Decode the v3 fixed-layout telemetry payload."""
+    i16 = lambda offset: struct.unpack_from("<h", payload, offset)[0]
+    u16 = lambda offset: struct.unpack_from("<H", payload, offset)[0]
+    i8 = lambda offset: struct.unpack_from("<b", payload, offset)[0]
+    return {
+        "sequence": sequence,
+        "uptime_ms": struct.unpack_from("<I", payload, 0)[0],
+        "gyro_x": i16(4),
+        "gyro_y": i16(6),
+        "gyro_z": i16(8),
+        "roll": i16(10),
+        "pitch": i16(12),
+        "yaw": i16(14),
+        "flags": payload[16],
+        "heading_target": i16(17),
+        "heading_error": i16(19),
+        "heading_correction": i8(21),
+        "left_duty": i8(22),
+        "right_duty": i8(23),
+        "tracking_enabled": payload[24],
+        "line_bits": payload[25],
+        "line_error": i8(26),
+        "line_active": payload[27],
+        "track_state": payload[28],
+        "line_correction": i8(29),
+        "target_left_cps": i16(30),
+        "target_right_cps": i16(32),
+        "measured_left_cps": i16(34),
+        "measured_right_cps": i16(36),
+        "base_speed": payload[38],
+        "motor_limit": payload[39],
+        "motor_minimum": payload[40],
+        "output_slew": payload[41],
+        "kp_percent": u16(42),
+        "kd_percent": u16(44),
+        "gyro_percent": u16(46),
+        "speed_full_scale_cps": u16(48),
+        "speed_kp_percent": u16(50),
+        "speed_ki_percent": u16(52),
+        "heading_kp_percent": u16(54),
+        "heading_ki_percent": u16(56),
+        "heading_kd_percent": u16(58),
+        "heading_limit": payload[60],
+        "turn_speed": payload[61],
+        "turn_angle_deg": payload[62],
+        "turn_tolerance_deg": payload[63],
+        "turn_sign": i8(64),
+        "turn_detect_cycles": payload[65],
+        "imu_age_ms": u16(66),
+        "line_trim_limit": payload[68],
+        "heading_sign": i8(69),
+    }
 
 
 def frame_crc16(data: bytes | bytearray) -> int:
@@ -67,7 +163,7 @@ class EspSerialLink:
         self.port = port
         self.baud = baud
         self.sequence = 0
-        self.lines: queue.Queue[str] = queue.Queue()
+        self.lines: queue.Queue[Any] = queue.Queue()
         self._serial: serial.Serial | None = None
         self._write_lock = threading.Lock()
         self._stop_reader = threading.Event()
@@ -134,6 +230,21 @@ class EspSerialLink:
 
         return sequence
 
+    def send_parameter(self, name: str, value: int) -> int:
+        if name not in PARAMETER_IDS:
+            raise ValueError(f"Unknown parameter: {name}")
+        if not self.connected:
+            raise serial.SerialException("Serial port is not connected")
+        sequence = self.sequence
+        self.sequence = (self.sequence + 1) & 0xFFFF
+        payload = struct.pack("<Bi", PARAMETER_IDS[name], int(value))
+        message = encode_frame(FRAME_TYPE_PARAMETER, sequence, payload)
+        with self._write_lock:
+            assert self._serial is not None
+            self._serial.write(message)
+            self._serial.flush()
+        return sequence
+
     def _read_loop(self) -> None:
         frame = bytearray()
         expected_length = 0
@@ -172,15 +283,8 @@ class EspSerialLink:
                 self.lines.put(
                     f"{prefix},{sequence},{command},{speed},{status}"
                 )
-            elif (
-                frame_type == FRAME_TYPE_TELEMETRY
-                and payload_size == 25
-            ):
-                values = struct.unpack("<IhhhhhhBhhbbbB", payload)
-                self.lines.put(
-                    "CAR,TEL,"
-                    + ",".join(str(value) for value in (sequence, *values))
-                )
+            elif frame_type == FRAME_TYPE_TELEMETRY and payload_size == 70:
+                self.lines.put(decode_telemetry(payload, sequence))
             else:
                 self.lines.put(
                     f"[FRAME] type={frame_type} seq={sequence} "
@@ -343,6 +447,275 @@ class SpeedGauge(tk.Canvas):
         self.itemconfigure(self._value_text, text=str(value))
 
 
+class HistoryPlot(tk.Canvas):
+    """Small dependency-free scrolling plot rendered by Tk itself."""
+
+    def __init__(
+        self,
+        parent: tk.Widget,
+        title: str,
+        series: tuple[tuple[str, str, str, float], ...],
+    ) -> None:
+        super().__init__(
+            parent,
+            height=190,
+            bg="#ffffff",
+            highlightbackground="#cbd9e6",
+            highlightthickness=1,
+        )
+        self.title = title
+        self.series = series
+
+    def redraw(self, samples: list[dict[str, Any]]) -> None:
+        self.delete("all")
+        width = max(self.winfo_width(), 420)
+        height = max(self.winfo_height(), 190)
+        left, top, right, bottom = 54, 28, width - 16, height - 28
+        self.create_text(
+            12, 9, anchor="nw", text=self.title,
+            fill="#11243d", font=("Bahnschrift SemiBold", 10),
+        )
+        if len(samples) < 2:
+            self.create_text(
+                width / 2, height / 2, text="等待遥测数据",
+                fill="#7890a8", font=("Microsoft YaHei UI", 10),
+            )
+            return
+
+        values: list[float] = []
+        for key, _label, _color, scale in self.series:
+            values.extend(float(item[key]) * scale for item in samples)
+        low, high = min(values), max(values)
+        if math.isclose(low, high):
+            low -= 1.0
+            high += 1.0
+        margin = (high - low) * 0.12
+        low -= margin
+        high += margin
+
+        for grid in range(5):
+            y = top + (bottom - top) * grid / 4
+            value = high - (high - low) * grid / 4
+            self.create_line(left, y, right, y, fill="#e6edf3")
+            self.create_text(
+                left - 5, y, anchor="e", text=f"{value:.1f}",
+                fill="#7890a8", font=("Cascadia Mono", 7),
+            )
+
+        count = len(samples)
+        for key, label, color, scale in self.series:
+            points: list[float] = []
+            for index, item in enumerate(samples):
+                x = left + (right - left) * index / (count - 1)
+                value = float(item[key]) * scale
+                y = bottom - (value - low) * (bottom - top) / (high - low)
+                points.extend((x, y))
+            self.create_line(*points, fill=color, width=2, smooth=False)
+
+        legend_x = right
+        for _key, label, color, _scale in reversed(self.series):
+            legend_x -= 78
+            self.create_line(
+                legend_x, 14, legend_x + 15, 14, fill=color, width=3
+            )
+            self.create_text(
+                legend_x + 19, 14, anchor="w", text=label,
+                fill="#52677d", font=("Bahnschrift", 8),
+            )
+
+
+class TuningWindow:
+    PARAMS = (
+        ("BASE", "base_speed", 0, 100),
+        ("LIMIT", "motor_limit", 1, 100),
+        ("MINIMUM", "motor_minimum", 0, 80),
+        ("SLEW", "output_slew", 1, 20),
+        ("LINE_TRIM_LIMIT", "line_trim_limit", 0, 15),
+        ("HEADING_KP", "heading_kp_percent", 0, 300),
+        ("HEADING_KI", "heading_ki_percent", 0, 300),
+        ("HEADING_KD", "heading_kd_percent", 0, 300),
+        ("HEADING_LIMIT", "heading_limit", 0, 40),
+        ("HEADING_SIGN", "heading_sign", -1, 1),
+        ("TURN_SPEED", "turn_speed", 1, 60),
+        ("TURN_ANGLE", "turn_angle_deg", 30, 180),
+        ("TURN_TOLERANCE", "turn_tolerance_deg", 1, 20),
+        ("TURN_DETECT_CYCLES", "turn_detect_cycles", 1, 20),
+        ("TURN_SIGN", "turn_sign", -1, 1),
+        ("SPEED_FULL_SCALE", "speed_full_scale_cps", 100, 10000),
+        ("SPEED_KP", "speed_kp_percent", 0, 300),
+        ("SPEED_KI", "speed_ki_percent", 0, 300),
+    )
+
+    def __init__(self, app: "CarControllerApp") -> None:
+        self.app = app
+        self.window = tk.Toplevel(app.root)
+        self.window.title("循迹实时曲线与参数调节")
+        self.window.geometry("1280x820")
+        self.window.configure(bg=app.BG)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.variables: dict[str, tk.IntVar] = {}
+        self.entries: dict[str, tk.Entry] = {}
+
+        charts = tk.Frame(self.window, bg=app.BG)
+        charts.pack(side="left", fill="both", expand=True, padx=12, pady=12)
+        self.line_plot = HistoryPlot(
+            charts, "灰度位置 / 修正",
+            (
+                ("line_error", "line error", app.CYAN, 1.0),
+                ("line_correction", "line trim", app.MAGENTA, 1.0),
+            ),
+        )
+        self.heading_plot = HistoryPlot(
+            charts, "IMU 航向闭环",
+            (
+                ("heading_error", "yaw error", app.ORANGE, 0.01),
+                ("gyro_z", "gyro Z", app.CYAN, 0.1),
+                ("heading_correction", "correction", app.MAGENTA, 1.0),
+            ),
+        )
+        self.motor_plot = HistoryPlot(
+            charts, "编码器目标 / 实测速度",
+            (
+                ("target_left_cps", "target L", app.MAGENTA, 1.0),
+                ("measured_left_cps", "speed L", "#8b5cf6", 1.0),
+                ("target_right_cps", "target R", app.CYAN, 1.0),
+                ("measured_right_cps", "speed R", app.LIME, 1.0),
+            ),
+        )
+        for plot in (self.line_plot, self.heading_plot, self.motor_plot):
+            plot.pack(fill="both", expand=True, pady=(0, 10))
+
+        controls = tk.Frame(
+            self.window, bg=app.PANEL,
+            highlightbackground=app.EDGE, highlightthickness=1,
+        )
+        controls.pack(side="right", fill="y", padx=(0, 12), pady=12)
+        tk.Label(
+            controls, text="参数在线调节", bg=app.PANEL, fg=app.TEXT,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=12, pady=12)
+
+        for row, (name, _key, minimum, maximum) in enumerate(
+            self.PARAMS, start=1
+        ):
+            tk.Label(
+                controls, text=name, bg=app.PANEL, fg=app.MUTED,
+                font=("Cascadia Mono", 8),
+            ).grid(row=row, column=0, sticky="w", padx=(12, 6), pady=2)
+            variable = tk.IntVar(value=0)
+            entry = tk.Entry(
+                controls, textvariable=variable, width=8,
+                justify="right", relief="solid", bd=1,
+            )
+            entry.grid(row=row, column=1, padx=4, pady=2)
+            tk.Button(
+                controls, text="SET",
+                command=lambda selected=name: self.apply(selected),
+                bg=app.CYAN, fg="#ffffff", relief="flat", padx=8,
+            ).grid(row=row, column=2, padx=(4, 12), pady=2)
+            self.variables[name] = variable
+            self.entries[name] = entry
+            entry.bind(
+                "<Return>", lambda _event, selected=name: self.apply(selected)
+            )
+            entry.configure(
+                validate="focusout",
+                validatecommand=(
+                    self.window.register(
+                        lambda text, lo=minimum, hi=maximum:
+                        text.lstrip("-").isdigit()
+                        and lo <= int(text) <= hi
+                    ),
+                    "%P",
+                ),
+            )
+
+        button_row = len(self.PARAMS) + 1
+        tk.Button(
+            controls, text="导出当前曲线 CSV", command=self.export_csv,
+            bg=app.MAGENTA, fg="#ffffff", relief="flat", pady=8,
+        ).grid(
+            row=button_row, column=0, columnspan=3,
+            sticky="ew", padx=12, pady=(12, 6),
+        )
+        self.status = tk.StringVar(value="等待遥测")
+        tk.Label(
+            controls, textvariable=self.status, bg=app.PANEL,
+            fg=app.ORANGE, font=("Microsoft YaHei UI", 9),
+            wraplength=260, justify="left",
+        ).grid(
+            row=button_row + 1, column=0, columnspan=3,
+            sticky="w", padx=12, pady=(2, 12),
+        )
+        self.window.after(100, self.refresh)
+
+    def apply(self, name: str) -> None:
+        try:
+            value = self.variables[name].get()
+            if name in ("HEADING_SIGN", "TURN_SIGN") and value not in (-1, 1):
+                raise ValueError(f"{name} 只能为 -1 或 1")
+            sequence = self.app.link.send_parameter(name, value)
+        except (ValueError, tk.TclError, OSError, serial.SerialException) as error:
+            self.status.set(f"发送失败：{error}")
+            return
+        self.status.set(f"已发送 #{sequence}  {name}={value}，等待遥测确认")
+        self.app._append_log(
+            f"[PARAM TX] seq={sequence} {name}={value}", "tx"
+        )
+
+    def refresh_config(self, sample: dict[str, Any]) -> None:
+        for name, key, _minimum, _maximum in self.PARAMS:
+            if self.window.focus_get() is self.entries[name]:
+                continue
+            self.variables[name].set(int(sample[key]))
+
+    def refresh(self) -> None:
+        if not self.window.winfo_exists():
+            return
+        samples = list(self.app.telemetry_history)
+        visible = samples[-500:]
+        for plot in (self.line_plot, self.heading_plot, self.motor_plot):
+            plot.redraw(visible)
+        if samples:
+            sample = samples[-1]
+            state_id = int(sample["track_state"])
+            state = (
+                TRACK_STATES[state_id]
+                if 0 <= state_id < len(TRACK_STATES)
+                else f"STATE_{state_id}"
+            )
+            self.status.set(
+                f"状态 {state}  灰度 {sample['line_bits']:07b}  "
+                f"IMU延迟 {sample['imu_age_ms']} ms"
+            )
+            self.refresh_config(sample)
+        self.window.after(100, self.refresh)
+
+    def export_csv(self) -> None:
+        samples = list(self.app.telemetry_history)
+        if not samples:
+            messagebox.showinfo("导出", "当前还没有遥测数据")
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.window,
+            title="保存循迹遥测",
+            defaultextension=".csv",
+            filetypes=(("CSV", "*.csv"),),
+            initialfile=f"tmx_telemetry_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+        )
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(samples[0].keys()))
+            writer.writeheader()
+            writer.writerows(samples)
+        self.status.set(f"已导出 {len(samples)} 帧：{path}")
+
+    def close(self) -> None:
+        self.app.tuning_window = None
+        self.window.destroy()
+
+
 class CarControllerApp:
     REPEAT_MS = 200
     TELEMETRY_TIMEOUT_S = 0.8
@@ -377,6 +750,8 @@ class CarControllerApp:
         self.last_imu_fault: int | None = None
         self.tracking_enabled = False
         self.movement_buttons: list[tk.Button] = []
+        self.telemetry_history: deque[dict[str, Any]] = deque(maxlen=3000)
+        self.tuning_window: TuningWindow | None = None
 
         root.title("APEX // ESP-NOW VEHICLE CONTROL")
         screen_width = root.winfo_screenwidth()
@@ -667,6 +1042,21 @@ class CarControllerApp:
 
     def _build_power_panel(self, panel: tk.Frame) -> None:
         self._section_header(panel, "02", "POWER OUTPUT", self.CYAN)
+        tk.Button(
+            panel,
+            text="实时曲线 / 参数调节",
+            command=self.open_tuning_window,
+            bg=self.ORANGE,
+            fg="#ffffff",
+            activebackground="#ff9348",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(anchor="e", padx=24, pady=(0, 2))
         self.gauge = SpeedGauge(panel, self.speed_var.get())
         self.gauge.pack(pady=(0, 0))
 
@@ -876,6 +1266,13 @@ class CarControllerApp:
             lambda _event: self.stop_if_current(command),
         )
 
+    def open_tuning_window(self) -> None:
+        if self.tuning_window is not None:
+            self.tuning_window.window.lift()
+            self.tuning_window.window.focus_force()
+            return
+        self.tuning_window = TuningWindow(self)
+
     def _bind_keys(self) -> None:
         key_commands = {
             "w": "FORWARD",
@@ -1072,13 +1469,14 @@ class CarControllerApp:
     def _poll_logs(self) -> None:
         while True:
             try:
-                line = self.link.lines.get_nowait()
+                item = self.link.lines.get_nowait()
             except queue.Empty:
                 break
 
-            if line.startswith("CAR,TEL,"):
-                if self._update_telemetry(line):
-                    continue
+            if isinstance(item, dict):
+                self._update_telemetry(item)
+                continue
+            line = str(item)
             if "RX heartbeat" in line:
                 self.last_radio_rx = time.monotonic()
             if line.startswith("ESP,ACK,"):
@@ -1095,32 +1493,29 @@ class CarControllerApp:
             self._append_log(line, tag)
         self.root.after(100, self._poll_logs)
 
-    def _update_telemetry(self, line: str) -> bool:
-        """解析基站 ESP 转发的 IMU/航向遥测并刷新仪表。"""
-        parts = line.split(",")
-        if len(parts) != 17:
-            return False
-        try:
-            gyro_x = int(parts[4]) / 10.0
-            gyro_y = int(parts[5]) / 10.0
-            gyro_z = int(parts[6]) / 10.0
-            roll = int(parts[7]) / 100.0
-            pitch = int(parts[8]) / 100.0
-            yaw = int(parts[9]) / 100.0
-            flags = int(parts[10])
-            imu_fault = (flags >> 2) & 0x3F
-            target = int(parts[11]) / 100.0
-            error = int(parts[12]) / 100.0
-            correction = int(parts[13])
-            tracking_enabled = int(parts[16])
-        except ValueError:
-            return False
+    def _update_telemetry(self, sample: dict[str, Any]) -> None:
+        """刷新仪表并保存一帧可绘图、可导出的完整遥测。"""
+        gyro_x = int(sample["gyro_x"]) / 10.0
+        gyro_y = int(sample["gyro_y"]) / 10.0
+        gyro_z = int(sample["gyro_z"]) / 10.0
+        roll = int(sample["roll"]) / 100.0
+        pitch = int(sample["pitch"]) / 100.0
+        yaw = int(sample["yaw"]) / 100.0
+        flags = int(sample["flags"])
+        imu_fault = (flags >> 2) & 0x3F
+        target = int(sample["heading_target"]) / 100.0
+        error = int(sample["heading_error"]) / 100.0
+        correction = int(sample["heading_correction"])
+        tracking_enabled = int(sample["tracking_enabled"])
         if tracking_enabled not in (0, 1):
-            return False
+            return
 
+        sample["pc_time_s"] = time.time()
+        self.telemetry_history.append(sample)
         now = time.monotonic()
         self.last_radio_rx = now
         self.last_telemetry_rx = now
+
         if flags & 0x01:
             self.gyro_x_var.set(f"{gyro_x:+.1f}°/s")
             self.gyro_y_var.set(f"{gyro_y:+.1f}°/s")
@@ -1139,8 +1534,10 @@ class CarControllerApp:
             )
             self._clear_imu_values()
             self._set_imu_status(f"IMU ERROR  //  {fault_name}", self.DANGER)
-            if self.last_imu_valid is not False or \
-                    imu_fault != self.last_imu_fault:
+            if (
+                self.last_imu_valid is not False
+                or imu_fault != self.last_imu_fault
+            ):
                 self._append_log(
                     f"CAR IMU ERROR: {fault_name} ({imu_fault})", "error"
                 )
@@ -1153,14 +1550,22 @@ class CarControllerApp:
             )
         else:
             self.heading_var.set("FREE")
+
         self._set_tracking_visual(bool(tracking_enabled))
-        if tracking_enabled and self.current_command == "STOP":
+        state_id = int(sample["track_state"])
+        state = (
+            TRACK_STATES[state_id]
+            if 0 <= state_id < len(TRACK_STATES)
+            else f"STATE_{state_id}"
+        )
+        if tracking_enabled:
             self.command_var.set("TRACK")
-            self.vector_var.set("LINE FOLLOWING ACTIVE")
-        elif not tracking_enabled and self.command_var.get() == "TRACK":
+            self.vector_var.set(
+                f"{state} / LINE {int(sample['line_bits']):07b}"
+            )
+        elif self.command_var.get() == "TRACK":
             self.command_var.set("STOP")
             self.vector_var.set("VEHICLE SAFE")
-        return True
 
     def _clear_imu_values(self) -> None:
         self.gyro_x_var.set("--°/s")
