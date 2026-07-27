@@ -15,7 +15,8 @@ PC、基站 ESP、车载 ESP 与 MSPM0G3507 使用统一的二进制串口帧。
 | GPIO4 / UART1 RX | PA8 / UART1 TX |
 | GND | GND |
 
-WitMotion IMU 使用车载 ESP 的 UART0，参数为 `9600 8N1`：
+WitMotion JY61P 使用车载 ESP 的 UART0，参数为 `115200 8N1`。从机 ESP
+会在首次启动时自动把仍处于出厂 `9600` 的传感器迁移到 `115200` 并保存：
 
 | WitMotion IMU | 车载 ESP32-C6 |
 | --- | --- |
@@ -69,7 +70,7 @@ flags bit0 表示有效，flags[7:2] 为故障码。
 - `correction/left/right`：三个有符号 8 位；
 - `tracking`：0 或 1。
 
-MSPM0 每 50 ms 发送一帧。车载 ESP 校验后转换为 ESP-NOW 遥测包，基站 ESP
+MSPM0 每 20 ms 发送一帧。车载 ESP 校验后转换为 ESP-NOW 遥测包，基站 ESP
 再将同格式二进制串口帧交给 PC。
 
 ### `0x04` ACK，负载 3 字节

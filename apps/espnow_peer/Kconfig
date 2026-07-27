@@ -66,10 +66,12 @@ menu "WitMotion IMU UART"
 
 config IMU_UART_BAUD_RATE
 	int "IMU UART baud rate"
-	range 1200 921600
-	default 9600
+	range 115200 115200
+	default 115200
 	help
-	  UART0 baud rate for the WitMotion 0x55 binary protocol.
+	  UART0 baud rate for the WitMotion 0x55 binary protocol. The car-side
+	  ESP automatically migrates a factory-default JY61P from 9600 baud
+	  to 115200 baud and saves the setting once.
 
 config IMU_UART_STALE_TIMEOUT_MS
 	int "IMU stale timeout in milliseconds"

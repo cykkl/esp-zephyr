@@ -95,10 +95,16 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 	const bool is_broadcast =
 		memcmp(destination, broadcast_mac, ESP_NOW_ETH_ALEN) == 0;
 
-	LOG_INF("RX [%s] from %02x:%02x:%02x:%02x:%02x:%02x RSSI=%d len=%d",
-		is_broadcast ? "BCAST" : "UNICAST",
-		source[0], source[1], source[2], source[3], source[4], source[5],
-		info->rx_ctrl->rssi, length);
+	/*
+	 * Telemetry is a high-rate stream. Keep per-packet logs for commands
+	 * and heartbeats, but avoid consuming PC UART/UI capacity at 50 Hz.
+	 */
+	if (length != sizeof(struct car_telemetry_packet)) {
+		LOG_INF("RX [%s] from %02x:%02x:%02x:%02x:%02x:%02x RSSI=%d len=%d",
+			is_broadcast ? "BCAST" : "UNICAST",
+			source[0], source[1], source[2], source[3],
+			source[4], source[5], info->rx_ctrl->rssi, length);
+	}
 
 	if (length == sizeof(struct car_control_packet)) {
 		const struct car_control_packet *packet =

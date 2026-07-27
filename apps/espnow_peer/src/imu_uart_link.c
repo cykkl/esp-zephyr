@@ -34,11 +34,16 @@ LOG_MODULE_REGISTER(imu_uart_link, LOG_LEVEL_INF);
 #define WIT_FRAME_ANGLE 0x53U
 #define IMU_THREAD_STACK_SIZE 1536
 #define IMU_THREAD_PRIORITY 5
-#define IMU_PUBLISH_MIN_PERIOD_MS 50
+#define IMU_PUBLISH_MIN_PERIOD_MS 20
 #define IMU_FAULT_REPORT_PERIOD_MS 200
-#define WIT_DEFAULT_BAUD_RATE 9600
+#define WIT_FACTORY_BAUD_RATE 9600U
+#define WIT_BAUD_REGISTER 0x04U
+#define WIT_BAUD_115200 0x0006U
+#define WIT_BAUD_PROBE_MS 350
+#define WIT_BAUD_PROBE_FRAME_COUNT 2U
+#define WIT_COMMAND_SETTLE_MS 100
 #define WIT_OUTPUT_GYRO_AND_ANGLE 0x000cU
-#define WIT_OUTPUT_RATE_20_HZ 0x0007U
+#define WIT_OUTPUT_RATE_50_HZ 0x0008U
 
 static const struct device *const imu_uart = DEVICE_DT_GET(IMU_UART_NODE);
 static uint8_t frame[WIT_FRAME_SIZE];
@@ -89,24 +94,143 @@ static void write_wit_register(uint8_t address, uint16_t value)
 	k_sleep(K_MSEC(3));
 }
 
+static bool frame_checksum_valid(const uint8_t *data);
+
+static bool probe_wit_sensor(int32_t timeout_ms)
+{
+	uint8_t probe_frame[WIT_FRAME_SIZE];
+	size_t probe_length = 0U;
+	uint8_t valid_frames = 0U;
+	const int64_t deadline = k_uptime_get() + timeout_ms;
+	unsigned char byte;
+
+	while (k_uptime_get() < deadline) {
+		if (uart_poll_in(imu_uart, &byte) != 0) {
+			k_sleep(K_MSEC(1));
+			continue;
+		}
+
+		if (probe_length == 0U && byte != WIT_FRAME_HEADER) {
+			continue;
+		}
+
+		probe_frame[probe_length++] = byte;
+		if (probe_length != WIT_FRAME_SIZE) {
+			continue;
+		}
+
+		if (frame_checksum_valid(probe_frame)) {
+			valid_frames++;
+			if (valid_frames >= WIT_BAUD_PROBE_FRAME_COUNT) {
+				return true;
+			}
+		}
+		probe_length = 0U;
+	}
+
+	return false;
+}
+
+static void flush_wit_uart(void)
+{
+	unsigned char byte;
+
+	while (uart_poll_in(imu_uart, &byte) == 0) {
+		/* Discard bytes captured while changing baud rate. */
+	}
+	frame_length = 0U;
+}
+
+static void configure_wit_stream(const uint8_t *unlock, size_t unlock_size)
+{
+	write_wit_bytes(unlock, unlock_size);
+	k_sleep(K_MSEC(WIT_COMMAND_SETTLE_MS));
+	write_wit_register(0x02U, WIT_OUTPUT_GYRO_AND_ANGLE);
+	k_sleep(K_MSEC(WIT_COMMAND_SETTLE_MS));
+	write_wit_register(0x03U, WIT_OUTPUT_RATE_50_HZ);
+	k_sleep(K_MSEC(WIT_COMMAND_SETTLE_MS));
+}
+
 /*
- * 模块固定使用出厂兼容的 9600 8N1。9600 无法承载角速度和姿态角两帧
- * 同时以 100 Hz 输出，因此把输出频率限制为 20 Hz。
- * 不写 SAVE，避免每次开机擦写传感器配置存储；固件每次启动都会重新配置。
+ * Probe the configured baud first so an already-migrated sensor incurs no
+ * flash writes. If no valid frames are found, configure a factory-default
+ * JY61P at 9600, move both sides to 115200, and save the setting once.
  */
 static int configure_wit_sensor(void)
 {
 	static const uint8_t unlock[] = {0xffU, 0xaaU, 0x69U, 0x88U, 0xb5U};
-	int error = configure_local_uart(WIT_DEFAULT_BAUD_RATE);
+	static const uint8_t save[] = {0xffU, 0xaaU, 0x00U, 0x00U, 0x00U};
+	int error = configure_local_uart(CONFIG_IMU_UART_BAUD_RATE);
 
 	if (error != 0) {
 		return error;
 	}
 	k_sleep(K_MSEC(20));
-	write_wit_bytes(unlock, sizeof(unlock));
-	k_sleep(K_MSEC(3));
-	write_wit_register(0x02U, WIT_OUTPUT_GYRO_AND_ANGLE);
-	write_wit_register(0x03U, WIT_OUTPUT_RATE_20_HZ);
+	flush_wit_uart();
+	if (probe_wit_sensor(WIT_BAUD_PROBE_MS)) {
+		LOG_INF("JY61P detected at %d baud",
+			CONFIG_IMU_UART_BAUD_RATE);
+		configure_wit_stream(unlock, sizeof(unlock));
+		flush_wit_uart();
+		return 0;
+	}
+
+	error = configure_local_uart(WIT_FACTORY_BAUD_RATE);
+	if (error != 0) {
+		return error;
+	}
+	k_sleep(K_MSEC(20));
+	flush_wit_uart();
+	if (!probe_wit_sensor(WIT_BAUD_PROBE_MS)) {
+		LOG_WRN("JY61P not detected at 115200 or factory 9600 baud");
+		return configure_local_uart(CONFIG_IMU_UART_BAUD_RATE);
+	}
+
+	configure_wit_stream(unlock, sizeof(unlock));
+	write_wit_register(WIT_BAUD_REGISTER, WIT_BAUD_115200);
+	k_sleep(K_MSEC(WIT_COMMAND_SETTLE_MS));
+
+	/*
+	 * Some WitMotion revisions apply BAUD immediately and others after
+	 * SAVE. One SAVE at each speed safely covers both behaviours.
+	 */
+	write_wit_bytes(save, sizeof(save));
+	k_sleep(K_MSEC(WIT_COMMAND_SETTLE_MS));
+	error = configure_local_uart(CONFIG_IMU_UART_BAUD_RATE);
+	if (error != 0) {
+		return error;
+	}
+	k_sleep(K_MSEC(WIT_COMMAND_SETTLE_MS));
+	write_wit_bytes(save, sizeof(save));
+	k_sleep(K_MSEC(WIT_COMMAND_SETTLE_MS));
+	flush_wit_uart();
+
+	if (probe_wit_sensor(WIT_BAUD_PROBE_MS)) {
+		LOG_INF("JY61P migrated from 9600 to %d baud",
+			CONFIG_IMU_UART_BAUD_RATE);
+	} else {
+		LOG_WRN("JY61P did not answer after %d-baud migration",
+			CONFIG_IMU_UART_BAUD_RATE);
+
+		/*
+		 * Keep IMU data available when the module's RX wire is absent
+		 * or a firmware revision rejects the BAUD write. A later reboot
+		 * retries the migration.
+		 */
+		error = configure_local_uart(WIT_FACTORY_BAUD_RATE);
+		if (error != 0) {
+			return error;
+		}
+		k_sleep(K_MSEC(20));
+		flush_wit_uart();
+		if (probe_wit_sensor(WIT_BAUD_PROBE_MS)) {
+			LOG_WRN("JY61P remains at 9600 baud; using fallback");
+			return 0;
+		}
+
+		return configure_local_uart(CONFIG_IMU_UART_BAUD_RATE);
+	}
+
 	return 0;
 }
 
