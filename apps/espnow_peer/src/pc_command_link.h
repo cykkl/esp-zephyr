@@ -17,4 +17,7 @@ typedef int (*pc_command_handler_t)(uint16_t sequence,
 
 int pc_command_link_start(pc_command_handler_t handler);
 
+int pc_command_link_send_telemetry(
+	const struct car_telemetry_sample *sample);
+
 #endif

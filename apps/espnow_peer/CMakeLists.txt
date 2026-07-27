@@ -26,4 +26,5 @@ target_sources(app PRIVATE
 target_sources_ifdef(CONFIG_ESPNOW_NODE_ROLE_MASTER app PRIVATE
                      src/pc_command_link.c)
 target_sources_ifdef(CONFIG_ESPNOW_NODE_ROLE_SLAVE app PRIVATE
-                     src/ti_uart_link.c)
+                     src/ti_uart_link.c
+                     src/imu_uart_link.c)

@@ -18,15 +18,23 @@ foreach ($CurrentRole in $Roles) {
     $RoleName = $CurrentRole.ToLowerInvariant()
     $BuildDirectory = Join-Path $ProjectRoot "build-espnow-$RoleName"
     $RoleConfig = Join-Path $Application "$RoleName.conf"
+    $RoleOverlay = Join-Path $Application "boards\esp32c6_devkitc_hpcore_$RoleName.overlay"
 
     Write-Host "Building ESP-NOW $CurrentRole firmware"
-    west build `
-        -p $PristineMode `
-        -b esp32c6_devkitc/esp32c6/hpcore `
-        $Application `
-        -d $BuildDirectory `
-        -- `
+    $WestArguments = @(
+        'build',
+        '-p', $PristineMode,
+        '-b', 'esp32c6_devkitc/esp32c6/hpcore',
+        $Application,
+        '-d', $BuildDirectory,
+        '--',
         "-DEXTRA_CONF_FILE=$RoleConfig"
+    )
+    if (Test-Path -LiteralPath $RoleOverlay) {
+        $WestArguments += "-DEXTRA_DTC_OVERLAY_FILE=$RoleOverlay"
+    }
+
+    west @WestArguments
 
     if ($LASTEXITCODE -ne 0) {
         throw "ESP-NOW $CurrentRole build failed with exit code $LASTEXITCODE"

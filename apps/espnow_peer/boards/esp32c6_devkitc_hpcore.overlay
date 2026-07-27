@@ -33,7 +33,7 @@
 
 &uart1 {
 	status = "okay";
-	current-speed = <115200>;
+	current-speed = <460800>;
 	pinctrl-0 = <&ti_uart_default>;
 	pinctrl-names = "default";
 };

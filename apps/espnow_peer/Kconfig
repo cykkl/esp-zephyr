@@ -48,7 +48,7 @@ menu "TI UART Link"
 config TI_UART_BAUD_RATE
 	int "TI UART baud rate"
 	range 1200 3000000
-	default 115200
+	default 460800
 	help
 	  Runtime baud rate for the ESP master UART1 connection to the TI MCU.
 
@@ -58,6 +58,26 @@ config TI_UART_STATUS_INTERVAL_MS
 	default 1000
 	help
 	  Interval of the car-side ESP,ALIVE status line sent to the TI MCU.
+
+endmenu
+
+menu "WitMotion IMU UART"
+	depends on ESPNOW_NODE_ROLE_SLAVE
+
+config IMU_UART_BAUD_RATE
+	int "IMU UART baud rate"
+	range 1200 921600
+	default 9600
+	help
+	  UART0 baud rate for the WitMotion 0x55 binary protocol.
+
+config IMU_UART_STALE_TIMEOUT_MS
+	int "IMU stale timeout in milliseconds"
+	range 100 2000
+	default 300
+	help
+	  Report an IMU fault when valid gyro and angle frames are not both
+	  received within this interval.
 
 endmenu
 

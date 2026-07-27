@@ -45,9 +45,23 @@ F:\zephyr\.venv\Scripts\python.exe .\scripts\monitor-pair.py COM17 COM19 --durat
 PC GUI → COM17/UART0 → 主 ESP → ESP-NOW → 从 ESP → UART1 → MSPM0G3507
 ```
 
+IMU 数据先由车载 ESP 解码，再复用现有 UART1 交给 MSPM0G3507 做闭环：
+
+```text
+WitMotion IMU → 从 ESP UART0 → 从 ESP UART1 → MSPM0G3507
+MSPM0G3507 → UART1 → 从 ESP → ESP-NOW → 主 ESP → COM17 → PC GUI
+```
+
+遥测更新率为 20 Hz，包含三轴角速度、三轴姿态角、航向锁定目标/误差/修正量
+以及左右轮实际输出。
+
 - 主 ESP 从 PC 接收 STOP/FORWARD/BACKWARD/LEFT/RIGHT 和速度。
 - ESP-NOW 使用带 CRC16 的二进制控制帧。
 - 从 ESP 校验控制帧，再从 GPIO5 TX / GPIO4 RX 转发给 MSPM0G3507。
+- 从 ESP 使用重映射后的 UART0 GPIO2 TX / GPIO3 RX 接收 IMU，
+  解析 `0x55 0x52` 角速度帧和 `0x55 0x53` 姿态角帧。
+- 从机启动时把标准 WitMotion 模块配置成只输出角速度/姿态角、20 Hz、
+  9600 8N1；向 3507 的 IMU 转发周期为 50 ms。
 - 运动中 700 ms 没有新命令，从 ESP 自动向 TI 发送 STOP。
 
 PC 程序见 `../../pc/README.md`，TI 串口接线与协议见

@@ -7,6 +7,9 @@
  *   ESP,ALIVE,<uptime_ms>
  *
  * TI -> ESP:
+ *   CAR,READY,...
+ *   CAR,ACK,...
+ *   CAR,ERR,...
  *   PING
  *   STATUS
  *   ECHO,<text>
@@ -22,6 +25,7 @@
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/device.h>
@@ -52,9 +56,11 @@ static uint16_t current_sequence;
 static enum car_command current_command = CAR_COMMAND_STOP;
 static uint8_t current_speed;
 static int64_t last_command_time;
+static ti_telemetry_handler_t telemetry_handler;
 
 K_MUTEX_DEFINE(ti_tx_mutex);
 K_MSGQ_DEFINE(car_commands, sizeof(struct car_command_event), 8, 4);
+K_MSGQ_DEFINE(imu_samples, sizeof(struct car_imu_sample), 8, 4);
 K_THREAD_STACK_DEFINE(ti_uart_stack, TI_UART_STACK_SIZE);
 static struct k_thread ti_uart_thread_data;
 
@@ -100,11 +106,158 @@ static void send_command_to_ti(uint16_t sequence, enum car_command command,
 		sequence, car_command_name(command), speed);
 }
 
+/*
+ * IMU 与运动命令共用现有 UART1。所有写操作仍由本模块串行化，
+ * 避免两个线程同时发送时把 ASCII 行交叉在一起。
+ */
+static void send_imu_to_ti(const struct car_imu_sample *sample)
+{
+	ti_uart_write_line(
+		"CAR,IMU,%u,%d,%d,%d,%d,%d,%d,%u\r\n",
+		sample->sequence,
+		sample->gyro_x_dps, sample->gyro_y_dps, sample->gyro_z_dps,
+		sample->roll_deg, sample->pitch_deg, sample->yaw_deg,
+		sample->flags);
+}
+
+static bool parse_long(const char *text, long minimum, long maximum,
+		       long *value)
+{
+	char *end;
+
+	errno = 0;
+	const long parsed = strtol(text, &end, 10);
+	if (errno != 0 || end == text || *end != '\0' ||
+	    parsed < minimum || parsed > maximum) {
+		return false;
+	}
+	*value = parsed;
+	return true;
+}
+
+static bool parse_unsigned_long(const char *text, unsigned long maximum,
+				unsigned long *value)
+{
+	char *end;
+
+	if (text == NULL || *text == '\0' || *text == '-') {
+		return false;
+	}
+	errno = 0;
+	const unsigned long parsed = strtoul(text, &end, 10);
+	if (errno != 0 || end == text || *end != '\0' || parsed > maximum) {
+		return false;
+	}
+	*value = parsed;
+	return true;
+}
+
+/*
+ * MSPM0 使用紧凑 ASCII 帧跨过 UART；车载 ESP 在这里完成严格范围校验，
+ * 随后转换成带 CRC 的二进制 ESP-NOW 遥测包。
+ */
+static bool parse_telemetry(char *line, struct car_telemetry_sample *sample)
+{
+	char *save;
+	char *fields[14];
+
+	char *token = strtok_r(line, ",", &save);
+	if (token == NULL || strcmp(token, "CAR") != 0) {
+		return false;
+	}
+	token = strtok_r(NULL, ",", &save);
+	if (token == NULL || strcmp(token, "TEL") != 0) {
+		return false;
+	}
+	for (size_t index = 0; index < ARRAY_SIZE(fields); index++) {
+		fields[index] = strtok_r(NULL, ",", &save);
+		if (fields[index] == NULL) {
+			return false;
+		}
+	}
+	if (strtok_r(NULL, ",", &save) != NULL) {
+		return false;
+	}
+
+	unsigned long sequence;
+	unsigned long uptime_ms;
+	unsigned long flags;
+	long gyro_x;
+	long gyro_y;
+	long gyro_z;
+	long roll;
+	long pitch;
+	long yaw;
+	long target;
+	long error;
+	long correction;
+	long left;
+	long right;
+
+	if (!parse_unsigned_long(fields[0], UINT16_MAX, &sequence) ||
+	    !parse_unsigned_long(fields[1], UINT32_MAX, &uptime_ms) ||
+	    !parse_long(fields[2], INT16_MIN, INT16_MAX, &gyro_x) ||
+	    !parse_long(fields[3], INT16_MIN, INT16_MAX, &gyro_y) ||
+	    !parse_long(fields[4], INT16_MIN, INT16_MAX, &gyro_z) ||
+	    !parse_long(fields[5], INT16_MIN, INT16_MAX, &roll) ||
+	    !parse_long(fields[6], INT16_MIN, INT16_MAX, &pitch) ||
+	    !parse_long(fields[7], INT16_MIN, INT16_MAX, &yaw) ||
+	    !parse_unsigned_long(fields[8], UINT8_MAX, &flags) ||
+	    !parse_long(fields[9], INT16_MIN, INT16_MAX, &target) ||
+	    !parse_long(fields[10], INT16_MIN, INT16_MAX, &error) ||
+	    !parse_long(fields[11], INT8_MIN, INT8_MAX, &correction) ||
+	    !parse_long(fields[12], INT8_MIN, INT8_MAX, &left) ||
+	    !parse_long(fields[13], INT8_MIN, INT8_MAX, &right)) {
+		return false;
+	}
+
+	*sample = (struct car_telemetry_sample) {
+		.sequence = (uint16_t)sequence,
+		.uptime_ms = (uint32_t)uptime_ms,
+		.gyro_x_dps = (int16_t)gyro_x,
+		.gyro_y_dps = (int16_t)gyro_y,
+		.gyro_z_dps = (int16_t)gyro_z,
+		.roll_deg = (int16_t)roll,
+		.pitch_deg = (int16_t)pitch,
+		.yaw_deg = (int16_t)yaw,
+		.flags = (uint8_t)flags,
+		.heading_target_deg = (int16_t)target,
+		.heading_error_deg = (int16_t)error,
+		.heading_correction = (int8_t)correction,
+		.left_duty = (int8_t)left,
+		.right_duty = (int8_t)right,
+	};
+	return true;
+}
+
 static void handle_ti_command(char *line)
 {
-	LOG_INF("TI -> ESP: %s", line);
+	if (strncmp(line, "CAR,TEL,", 8) == 0) {
+		struct car_telemetry_sample sample;
 
-	if (strcmp(line, "PING") == 0) {
+		if (!parse_telemetry(line, &sample)) {
+			LOG_WRN("Rejected malformed TI telemetry");
+		} else if (telemetry_handler != NULL) {
+			const int error = telemetry_handler(&sample);
+			if (error != 0) {
+				LOG_WRN("Telemetry forwarding failed: %d", error);
+			}
+		}
+	} else if (strncmp(line, "CAR,ACK,", 8) == 0) {
+		LOG_INF("TI ACK: %s", line + 8);
+	} else if (strncmp(line, "CAR,ERR,", 8) == 0) {
+		LOG_WRN("TI rejected command: %s", line + 8);
+	} else if (strncmp(line, "CAR,", 4) == 0 ||
+		   strncmp(line, "STAT ", 5) == 0 ||
+		   strncmp(line, "OK ", 3) == 0 ||
+		   strncmp(line, "ERR ", 4) == 0 ||
+		   strcmp(line, "PONG") == 0) {
+		/*
+		 * These are TI responses/telemetry. They are logged only; replying
+		 * would make two unknown-command handlers echo errors forever.
+		 */
+		LOG_INF("TI -> ESP: %s", line);
+	} else if (strcmp(line, "PING") == 0) {
 		ti_uart_write_line("ESP,PONG,%" PRIu32 "\r\n",
 				   k_uptime_get_32());
 	} else if (strcmp(line, "STATUS") == 0) {
@@ -115,7 +268,7 @@ static void handle_ti_command(char *line)
 	} else if (strncmp(line, "ECHO,", 5) == 0) {
 		ti_uart_write_line("ESP,ECHO,%s\r\n", line + 5);
 	} else {
-		ti_uart_write_line("ESP,ERR,UNKNOWN_COMMAND\r\n");
+		LOG_WRN("Ignoring unknown TI UART line: %s", line);
 	}
 }
 
@@ -167,6 +320,7 @@ static void ti_uart_thread(void *unused1, void *unused2, void *unused3)
 
 	while (true) {
 		struct car_command_event event;
+		struct car_imu_sample imu_sample;
 
 		read_ti_uart(line, &line_length, &overflow);
 
@@ -174,6 +328,9 @@ static void ti_uart_thread(void *unused1, void *unused2, void *unused3)
 			send_command_to_ti(event.sequence,
 					   (enum car_command)event.command,
 					   event.speed);
+		}
+		while (k_msgq_get(&imu_samples, &imu_sample, K_NO_WAIT) == 0) {
+			send_imu_to_ti(&imu_sample);
 		}
 
 		const int64_t now = k_uptime_get();
@@ -191,7 +348,7 @@ static void ti_uart_thread(void *unused1, void *unused2, void *unused3)
 			next_alive = now + CONFIG_TI_UART_STATUS_INTERVAL_MS;
 		}
 
-		k_sleep(K_MSEC(5));
+		k_sleep(K_MSEC(1));
 	}
 }
 
@@ -229,6 +386,11 @@ int ti_uart_link_start(void)
 	return 0;
 }
 
+void ti_uart_link_set_telemetry_handler(ti_telemetry_handler_t handler)
+{
+	telemetry_handler = handler;
+}
+
 int ti_uart_link_send_car_command(uint16_t sequence,
 				  enum car_command command,
 				  uint8_t speed)
@@ -248,4 +410,15 @@ int ti_uart_link_send_car_command(uint16_t sequence,
 	};
 
 	return k_msgq_put(&car_commands, &event, K_NO_WAIT);
+}
+
+int ti_uart_link_send_imu(const struct car_imu_sample *sample)
+{
+	if (!link_started) {
+		return -EAGAIN;
+	}
+	if (sample == NULL) {
+		return -EINVAL;
+	}
+	return k_msgq_put(&imu_samples, sample, K_NO_WAIT);
 }

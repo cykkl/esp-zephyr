@@ -23,6 +23,7 @@
 #if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
 #include "pc_command_link.h"
 #else
+#include "imu_uart_link.h"
 #include "ti_uart_link.h"
 #endif
 
@@ -39,6 +40,10 @@ static const uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {
 };
 
 #if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+static bool imu_state_known;
+static bool last_imu_valid;
+static uint8_t last_imu_fault;
+
 static int forward_pc_command(uint16_t sequence, enum car_command command,
 			      uint8_t speed)
 {
@@ -58,6 +63,21 @@ static int forward_pc_command(uint16_t sequence, enum car_command command,
 	LOG_INF("Control TX seq=%u %s speed=%u",
 		sequence, car_command_name(command), packet.speed);
 	return 0;
+}
+#endif
+
+#if defined(CONFIG_ESPNOW_NODE_ROLE_SLAVE)
+static int forward_ti_telemetry(
+	const struct car_telemetry_sample *sample)
+{
+	struct car_telemetry_packet packet;
+
+	car_telemetry_packet_init(&packet, sample);
+	const esp_err_t error =
+		esp_now_send(broadcast_mac, (const uint8_t *)&packet,
+			     sizeof(packet));
+
+	return error == ESP_OK ? 0 : -EIO;
 }
 #endif
 
@@ -104,6 +124,46 @@ static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *dat
 
 		if (uart_error != 0) {
 			LOG_ERR("Car UART queue failed: %d", uart_error);
+		}
+#endif
+	} else if (length == sizeof(struct car_telemetry_packet)) {
+		const struct car_telemetry_packet *packet =
+			(const struct car_telemetry_packet *)data;
+		struct car_telemetry_sample sample;
+
+		if (!car_telemetry_packet_is_valid(packet)) {
+			LOG_WRN("Rejected invalid car-telemetry packet");
+			return;
+		}
+		car_telemetry_packet_decode(packet, &sample);
+
+#if defined(CONFIG_ESPNOW_NODE_ROLE_MASTER)
+		const uint8_t imu_fault =
+			car_telemetry_imu_fault(sample.flags);
+		const bool imu_valid =
+			(sample.flags & CAR_TELEMETRY_IMU_VALID) != 0U;
+		if (!imu_state_known || imu_valid != last_imu_valid ||
+		    imu_fault != last_imu_fault) {
+			if (imu_valid) {
+				if (imu_state_known) {
+					LOG_INF("Car IMU recovered");
+				} else {
+					LOG_INF("Car IMU ready");
+				}
+			} else {
+				LOG_WRN("Car IMU fault: %s (%u)",
+					car_imu_fault_name(imu_fault),
+					imu_fault);
+			}
+			imu_state_known = true;
+			last_imu_valid = imu_valid;
+			last_imu_fault = imu_fault;
+		}
+
+		const int pc_error =
+			pc_command_link_send_telemetry(&sample);
+		if (pc_error != 0) {
+			LOG_WRN("PC telemetry queue full: %d", pc_error);
 		}
 #endif
 	} else if (length == sizeof(struct espnow_heartbeat)) {
@@ -206,6 +266,12 @@ int main(void)
 	if (uart_error != 0) {
 		LOG_WRN("Continuing without car UART link");
 	}
+
+	const int imu_error = imu_uart_link_start();
+
+	if (imu_error != 0) {
+		LOG_WRN("Continuing without IMU UART link");
+	}
 #endif
 
 	error = esp_wifi_get_mode(&current_mode);
@@ -274,6 +340,10 @@ int main(void)
 		LOG_ERR("esp_now_add_peer failed: 0x%x", error);
 		return -EIO;
 	}
+
+#if defined(CONFIG_ESPNOW_NODE_ROLE_SLAVE)
+	ti_uart_link_set_telemetry_handler(forward_ti_telemetry);
+#endif
 
 	error = esp_wifi_get_mac(WIFI_IF_STA, local_mac);
 	if (error != ESP_OK) {
