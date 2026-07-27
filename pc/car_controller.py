@@ -7,6 +7,7 @@ import argparse
 import math
 import queue
 import re
+import struct
 import threading
 import time
 import tkinter as tk
@@ -25,6 +26,40 @@ COMMANDS = (
     "TRACK_OFF",
 )
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+FRAME_SYNC = b"\xA5\x5A"
+FRAME_VERSION = 1
+FRAME_TYPE_COMMAND = 1
+FRAME_TYPE_TELEMETRY = 3
+FRAME_TYPE_ACK = 4
+FRAME_HEADER_SIZE = 7
+FRAME_MAX_PAYLOAD = 25
+COMMAND_IDS = {name: index for index, name in enumerate(COMMANDS)}
+
+
+def frame_crc16(data: bytes | bytearray) -> int:
+    crc = 0xFFFF
+    for value in data:
+        crc ^= value << 8
+        for _ in range(8):
+            crc = (
+                ((crc << 1) ^ 0x1021) & 0xFFFF
+                if crc & 0x8000
+                else (crc << 1) & 0xFFFF
+            )
+    return crc
+
+
+def encode_frame(frame_type: int, sequence: int, payload: bytes) -> bytes:
+    header = struct.pack(
+        "<2sBBBH",
+        FRAME_SYNC,
+        FRAME_VERSION,
+        frame_type,
+        len(payload),
+        sequence,
+    )
+    body = header + payload
+    return body + struct.pack("<H", frame_crc16(body[2:]))
 
 
 class EspSerialLink:
@@ -89,7 +124,8 @@ class EspSerialLink:
         )
         sequence = self.sequence
         self.sequence = (self.sequence + 1) & 0xFFFF
-        message = f"CAR,{sequence},{command},{speed}\n".encode("ascii")
+        payload = struct.pack("<BB", COMMAND_IDS[command], speed)
+        message = encode_frame(FRAME_TYPE_COMMAND, sequence, payload)
 
         with self._write_lock:
             assert self._serial is not None
@@ -99,22 +135,116 @@ class EspSerialLink:
         return sequence
 
     def _read_loop(self) -> None:
+        frame = bytearray()
+        expected_length = 0
+        text = bytearray()
+
+        def emit_text() -> None:
+            if not text:
+                return
+            line = text.decode("utf-8", errors="replace").strip()
+            text.clear()
+            line = ANSI_ESCAPE.sub("", line)
+            if line:
+                self.lines.put(line)
+
+        def emit_frame(raw: bytes) -> None:
+            frame_type = raw[3]
+            payload_size = raw[4]
+            sequence = struct.unpack_from("<H", raw, 5)[0]
+            payload = raw[
+                FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + payload_size
+            ]
+            received_crc = struct.unpack_from(
+                "<H", raw, FRAME_HEADER_SIZE + payload_size
+            )[0]
+            if received_crc != frame_crc16(raw[2:-2]):
+                self.lines.put("[FRAME CRC ERROR]")
+                return
+            if frame_type == FRAME_TYPE_ACK and payload_size == 3:
+                command_id, speed, status = struct.unpack("<BBB", payload)
+                command = (
+                    COMMANDS[command_id]
+                    if command_id < len(COMMANDS)
+                    else "INVALID"
+                )
+                prefix = "ESP,ACK" if status == 0 else "ESP,NACK"
+                self.lines.put(
+                    f"{prefix},{sequence},{command},{speed},{status}"
+                )
+            elif (
+                frame_type == FRAME_TYPE_TELEMETRY
+                and payload_size == 25
+            ):
+                values = struct.unpack("<IhhhhhhBhhbbbB", payload)
+                self.lines.put(
+                    "CAR,TEL,"
+                    + ",".join(str(value) for value in (sequence, *values))
+                )
+            else:
+                self.lines.put(
+                    f"[FRAME] type={frame_type} seq={sequence} "
+                    f"len={payload_size}"
+                )
+
         while not self._stop_reader.is_set():
             connection = self._serial
             if connection is None:
                 return
 
             try:
-                raw = connection.readline()
+                raw = connection.read(256)
             except (OSError, serial.SerialException) as error:
                 self.lines.put(f"[串口错误] {error}")
                 return
 
-            if raw:
-                line = raw.decode("utf-8", errors="replace").strip()
-                line = ANSI_ESCAPE.sub("", line)
-                if line:
-                    self.lines.put(line)
+            for value in raw:
+                if frame or value == FRAME_SYNC[0]:
+                    if not frame:
+                        frame.append(value)
+                        continue
+                    if len(frame) == 1 and value != FRAME_SYNC[1]:
+                        frame.clear()
+                        expected_length = 0
+                        if value == FRAME_SYNC[0]:
+                            frame.append(value)
+                        elif value == 10:
+                            emit_text()
+                        elif value != 13:
+                            text.append(value)
+                        continue
+                    frame.append(value)
+                    if len(frame) == FRAME_HEADER_SIZE:
+                        payload_size = frame[4]
+                        if (
+                            frame[2] != FRAME_VERSION
+                            or payload_size > FRAME_MAX_PAYLOAD
+                        ):
+                            frame.clear()
+                            expected_length = 0
+                            continue
+                        expected_length = (
+                            FRAME_HEADER_SIZE + payload_size + 2
+                        )
+                    if (
+                        expected_length
+                        and len(frame) == expected_length
+                    ):
+                        emit_frame(bytes(frame))
+                        frame.clear()
+                        expected_length = 0
+                    elif (
+                        len(frame)
+                        > FRAME_HEADER_SIZE + FRAME_MAX_PAYLOAD + 2
+                    ):
+                        frame.clear()
+                        expected_length = 0
+                    continue
+
+                if value == 10:
+                    emit_text()
+                elif value != 13:
+                    text.append(value)
 
 
 class SpeedGauge(tk.Canvas):

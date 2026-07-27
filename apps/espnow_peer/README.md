@@ -55,6 +55,8 @@ MSPM0G3507 → UART1 → 从 ESP → ESP-NOW → 主 ESP → COM17 → PC GUI
 遥测更新率为 20 Hz，包含三轴角速度、三轴姿态角、航向锁定目标/误差/修正量
 以及左右轮实际输出。
 
+- PC 与主 ESP、从 ESP 与 TI 均使用带同步头、长度、序号和 CRC16 的紧凑
+  二进制串口帧，支持分包/粘包和错误后自动重同步。
 - 主 ESP 从 PC 接收 STOP/FORWARD/BACKWARD/LEFT/RIGHT、循迹开关和速度。
 - ESP-NOW 使用带 CRC16 的二进制控制帧。
 - 从 ESP 校验控制帧，再从 GPIO5 TX / GPIO4 RX 转发给 MSPM0G3507。

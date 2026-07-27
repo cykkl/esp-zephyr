@@ -1,11 +1,13 @@
-# 小车端 ESP 与 MSPM0G3507 UART 协议
+# 小车通信二进制协议
 
-车载 ESP32-C6（从机）使用 UART1 与 MSPM0G3507 通信，原有接口不变。
-从机 UART0 在应用启动后重映射到 GPIO2/GPIO3，专门接收 WitMotion IMU。
-板载 CH343 的 GPIO16/GPIO17 不与 IMU 共线，仍可用于 ROM 下载；从机应用日志
-不再输出到 UART0。
+PC、基站 ESP、车载 ESP 与 MSPM0G3507 使用统一的二进制串口帧。ESP-NOW
+无线段继续使用原有固定结构和 CRC16；串口接收器支持任意分包、连续粘包、
+错误字节自动重新同步和 CRC 错包丢弃。
 
 ## 接线
+
+车载 ESP 与 MSPM0G3507 使用交叉连接的 3.3 V TTL UART，参数为
+`460800 8N1`、无流控：
 
 | 车载 ESP32-C6 | MSPM0G3507 |
 | --- | --- |
@@ -13,144 +15,69 @@
 | GPIO4 / UART1 RX | PA8 / UART1 TX |
 | GND | GND |
 
-使用交叉连接的 3.3 V TTL UART，参数为 `460800 8N1`，无流控。
-
-IMU 与车载 ESP 的接线：
+WitMotion IMU 使用车载 ESP 的 UART0，参数为 `9600 8N1`：
 
 | WitMotion IMU | 车载 ESP32-C6 |
 | --- | --- |
 | RX | GPIO2 / UART0 TX |
 | TX | GPIO3 / UART0 RX |
 | GND | GND |
-| VCC | 按模块规格接电源 |
 
-从机启动时兼容模块出厂 `9600 8N1`，随后把标准 WitMotion 模块切换成
-`9600 8N1`、只输出角速度/姿态角、20 Hz。模块配置不写入永久存储，
-每次从机启动都会重新设置，避免反复擦写传感器配置区。
+## 帧格式
 
-## ESP 下发运动命令
+所有多字节整数均为小端序。
 
-所有消息使用 ASCII，并以 `\r\n` 结束：
+| 偏移 | 长度 | 字段 |
+| ---: | ---: | --- |
+| 0 | 2 | 同步头 `A5 5A` |
+| 2 | 1 | 协议版本，当前为 `1` |
+| 3 | 1 | 消息类型 |
+| 4 | 1 | 负载长度 |
+| 5 | 2 | 16 位序号 |
+| 7 | N | 负载 |
+| 7+N | 2 | CRC16-CCITT |
 
-```text
-CAR,CMD,<sequence>,<command>,<speed>
-```
+CRC 初值为 `0xFFFF`、多项式为 `0x1021`，计算范围从版本字段到负载末尾，
+不包含同步头和 CRC 字段。最大负载 25 字节，最大完整帧 34 字节。
 
-- `sequence`：0–65535。
-- `command`：`STOP`、`FORWARD`、`BACKWARD`、`LEFT`、`RIGHT`。
-- `speed`：0–100；`STOP` 必须为 0。
+## 消息类型
 
-示例：
+### `0x01` COMMAND，负载 2 字节
 
-```text
-CAR,CMD,10,FORWARD,35\r\n
-CAR,CMD,11,LEFT,25\r\n
-CAR,CMD,14,STOP,0\r\n
-```
+| 偏移 | 字段 |
+| ---: | --- |
+| 0 | 命令：0 STOP、1 FORWARD、2 BACKWARD、3 LEFT、4 RIGHT、5 TRACK_ON、6 TRACK_OFF |
+| 1 | 速度 0–100；STOP/TRACK_ON/TRACK_OFF 必须为 0 |
 
-循迹模式使用独立消息，不受手动控制 700 ms 失联停车计时影响：
+`TRACK_ON` 退出远程手动模式、使能电机并进入自动循迹；`TRACK_OFF` 立即清零
+左右轮输出并取消使能。运动命令仍受 ESP 700 ms 和 TI 1000 ms 两层失联停车
+保护。
 
-```text
-CAR,TRACK,<sequence>,<ON|OFF>\r\n
-```
+### `0x02` IMU，负载 13 字节
 
-- `ON`：退出远程手动模式、使能电机并进入七路传感器自动循迹。
-- `OFF`：退出循迹并立即清零左右轮输出、取消电机使能。
-- PC 窗口失焦、紧急停车或方向键接管时会自动发送 `OFF`。
+依次为 `gx/gy/gz/roll/pitch/yaw` 六个有符号 16 位整数，以及 1 字节 flags。
+flags bit0 表示有效，flags[7:2] 为故障码。
 
-MSPM0 成功入队后返回：
+### `0x03` TELEMETRY，负载 25 字节
 
-```text
-CAR,ACK,<sequence>,<command>,<speed>\r\n
-```
+依次为：
 
-失败返回：
+- `uptime_ms`：无符号 32 位；
+- `gx/gy/gz/roll/pitch/yaw`：六个有符号 16 位；
+- `flags`：1 字节；
+- `heading_target/heading_error`：两个有符号 16 位；
+- `correction/left/right`：三个有符号 8 位；
+- `tracking`：0 或 1。
 
-```text
-CAR,ERR,<sequence>,BAD_FORMAT\r\n
-CAR,ERR,<sequence>,UNKNOWN_COMMAND\r\n
-CAR,ERR,<sequence>,STOP_SPEED_MUST_BE_ZERO\r\n
-CAR,ERR,<sequence>,RANGE\r\n
-CAR,ERR,<sequence>,QUEUE_FULL\r\n
-```
+MSPM0 每 50 ms 发送一帧。车载 ESP 校验后转换为 ESP-NOW 遥测包，基站 ESP
+再将同格式二进制串口帧交给 PC。
 
-MSPM0 启动串口服务时发送：
+### `0x04` ACK，负载 3 字节
 
-```text
-CAR,READY,TMX,115200,<mspm_timeout_ms>\r\n
-```
+负载依次为命令、速度和状态：0=成功、1=坏帧、2=非法命令、3=队列满。
 
-ESP 只记录 `CAR,ACK`、`CAR,ERR`、`CAR,READY` 和 TI 遥测，不再对未知 TI
-输出自动回复，防止两端错误消息循环。
+## 兼容性
 
-## ESP 下发 IMU 数据
-
-车载 ESP 校验 WitMotion 的 11 字节二进制帧后，通过现有 UART1 向 3507 发送：
-
-```text
-CAR,IMU,<seq>,<gx>,<gy>,<gz>,<roll>,<pitch>,<yaw>,<flags>\r\n
-```
-
-- `gx/gy/gz` 来自 `0x55 0x52` 帧，单位 °/s。
-- `roll/pitch/yaw` 来自 `0x55 0x53` 帧，单位 °。
-- `flags` bit0 表示数据有效，`flags[7:2]` 表示故障码。
-- 3507 超过 250 ms 没收到有效 `CAR,IMU` 时会立即退出航向闭环。
-
-该消息与运动命令共用 GPIO5/GPIO4 对应的 UART1，不增加 3507 引脚。
-
-## 3507 回传 IMU 与航向遥测
-
-MSPM0 每 200 ms 向车载 ESP 发送：
-
-```text
-CAR,TEL,<seq>,<ms>,<gx>,<gy>,<gz>,<roll>,<pitch>,<yaw>,<flags>,
-        <target>,<error>,<correction>,<left>,<right>,<tracking>
-```
-
-- `gx/gy/gz`：JY61P 三轴角速度，单位 °/s。
-- `roll/pitch/yaw`：三轴姿态角，单位 °。
-- `flags` bit0：IMU 数据有效；bit1：远程直行航向环已锁定。
-- `flags[7:2]`：IMU 故障码，0=无故障、1=串口设备未就绪、
-  2=设备无响应、3=接收超时、4=数据过期、5=校验或其他I/O错误。
-- `target/error/correction`：目标航向、航向误差和左右轮差速修正。
-- `left/right`：MSPM0 最终输出的左右轮 PWM 百分比。
-- `tracking`：`1` 表示 TI 当前处于自动循迹模式，`0` 表示关闭。
-
-车载 ESP 校验并解析该行，转换为带 CRC16 的二进制 ESP-NOW 遥测包。基站
-ESP 校验无线包后再以同样的 `CAR,TEL` 文本行发给 PC，PC 控制界面实时显示
-YAW、GYRO Z、IMU故障原因和航向锁定状态。即使 IMU 读取失败，MSPM0
-仍会发送遥测；主机日志和 PC 界面只在故障状态发生变化时报告一次，
-避免每 200 ms 重复刷屏。
-
-## ESP 状态消息
-
-车载 ESP 会发送：
-
-```text
-ESP,READY,CAR_NODE,460800
-ESP,ALIVE,<uptime_ms>
-ESP,PONG,<uptime_ms>
-ESP,STATUS,CAR_NODE,<sequence>,<command>,<speed>
-ESP,ECHO,<text>
-```
-
-MSPM0 将所有 `ESP,` 开头的状态消息作为信息处理，不回送错误。
-
-MSPM0 仍可向 ESP 发送以下调试命令：
-
-```text
-PING
-STATUS
-ECHO,<text>
-```
-
-## 双层失联停车
-
-- PC 控制程序运动期间每 200 ms 刷新一次命令。
-- 车载 ESP 在 700 ms 没有新无线控制命令时向 MSPM0 发送 `STOP`。
-- MSPM0 在默认 1000 ms 没有收到新的 `CAR,CMD` 运动命令时，自行把左右 PWM
-  清零并取消电机使能。
-
-因此 PC、无线链路、ESP 程序或 UART 任一环节失联，最终都会停车。参数分别由
-ESP 的 `CONFIG_CAR_CONTROL_TIMEOUT_MS` 和 MSPM0 的
-`CONFIG_TMX_REMOTE_COMMAND_TIMEOUT_MS` 配置。
+ESP 和 MSPM0 暂时保留旧 ASCII 命令解析，便于串口手工调试；新版 PC 程序与
+固件默认使用二进制帧。升级时必须同时更新 PC 程序、主 ESP、从 ESP 和
+MSPM0G3507，不能混用新旧固件。

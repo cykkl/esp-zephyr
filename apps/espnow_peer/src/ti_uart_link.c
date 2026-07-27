@@ -35,6 +35,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/printk.h>
 
+#include "car_serial_protocol.h"
+
 LOG_MODULE_REGISTER(ti_uart_link, LOG_LEVEL_INF);
 
 #define TI_UART_NODE DT_ALIAS(ti_uart)
@@ -86,26 +88,38 @@ static void ti_uart_write_line(const char *format, ...)
 	k_mutex_unlock(&ti_tx_mutex);
 }
 
+static void ti_uart_write_bytes(const uint8_t *data, size_t length)
+{
+	k_mutex_lock(&ti_tx_mutex, K_FOREVER);
+	k_sched_lock();
+	for (size_t index = 0; index < length; ++index) {
+		uart_poll_out(ti_uart, data[index]);
+	}
+	k_sched_unlock();
+	k_mutex_unlock(&ti_tx_mutex);
+}
+
 static void send_command_to_ti(uint16_t sequence, enum car_command command,
 			       uint8_t speed)
 {
-	if (car_command_is_tracking(command)) {
-		const bool enabled = command == CAR_COMMAND_TRACK_ON;
+	uint8_t payload[CAR_SERIAL_COMMAND_PAYLOAD_SIZE];
+	uint8_t frame[CAR_SERIAL_MAX_FRAME_SIZE];
 
-		ti_uart_write_line("CAR,TRACK,%u,%s\r\n",
-				   sequence, enabled ? "ON" : "OFF");
-		LOG_INF("TI tracking seq=%u %s",
-			sequence, enabled ? "ON" : "OFF");
-		return;
-	}
-
-	if (command == CAR_COMMAND_STOP) {
+	if (command == CAR_COMMAND_STOP || car_command_is_tracking(command)) {
 		speed = 0U;
 	}
+	payload[0] = (uint8_t)command;
+	payload[1] = speed;
+	const size_t length = car_serial_encode(
+		frame, sizeof(frame), CAR_SERIAL_TYPE_COMMAND, sequence,
+		payload, sizeof(payload));
+	ti_uart_write_bytes(frame, length);
 
-	ti_uart_write_line("CAR,CMD,%u,%s,%u\r\n",
-			   sequence, car_command_name(command), speed);
-
+	if (car_command_is_tracking(command)) {
+		LOG_INF("TI tracking seq=%u %s", sequence,
+			command == CAR_COMMAND_TRACK_ON ? "ON" : "OFF");
+		return;
+	}
 	current_sequence = sequence;
 	current_command = command;
 	current_speed = speed;
@@ -122,12 +136,20 @@ static void send_command_to_ti(uint16_t sequence, enum car_command command,
  */
 static void send_imu_to_ti(const struct car_imu_sample *sample)
 {
-	ti_uart_write_line(
-		"CAR,IMU,%u,%d,%d,%d,%d,%d,%d,%u\r\n",
-		sample->sequence,
-		sample->gyro_x_dps, sample->gyro_y_dps, sample->gyro_z_dps,
-		sample->roll_deg, sample->pitch_deg, sample->yaw_deg,
-		sample->flags);
+	uint8_t payload[CAR_SERIAL_IMU_PAYLOAD_SIZE];
+	uint8_t frame[CAR_SERIAL_MAX_FRAME_SIZE];
+
+	sys_put_le16((uint16_t)sample->gyro_x_dps, &payload[0]);
+	sys_put_le16((uint16_t)sample->gyro_y_dps, &payload[2]);
+	sys_put_le16((uint16_t)sample->gyro_z_dps, &payload[4]);
+	sys_put_le16((uint16_t)sample->roll_deg, &payload[6]);
+	sys_put_le16((uint16_t)sample->pitch_deg, &payload[8]);
+	sys_put_le16((uint16_t)sample->yaw_deg, &payload[10]);
+	payload[12] = sample->flags;
+	const size_t length = car_serial_encode(
+		frame, sizeof(frame), CAR_SERIAL_TYPE_IMU, sample->sequence,
+		payload, sizeof(payload));
+	ti_uart_write_bytes(frame, length);
 }
 
 static bool parse_long(const char *text, long minimum, long maximum,
@@ -285,11 +307,93 @@ static void handle_ti_command(char *line)
 	}
 }
 
+static void handle_ti_frame(const uint8_t *frame, size_t length)
+{
+	if (!car_serial_frame_valid(frame, length)) {
+		LOG_WRN("Rejected TI frame CRC/type");
+		return;
+	}
+	const uint16_t sequence = car_serial_sequence(frame);
+	const uint8_t *payload = car_serial_const_payload(frame);
+
+	if (frame[3] == CAR_SERIAL_TYPE_TELEMETRY) {
+		struct car_telemetry_sample sample = {
+			.sequence = sequence,
+			.uptime_ms = sys_get_le32(&payload[0]),
+			.gyro_x_dps = (int16_t)sys_get_le16(&payload[4]),
+			.gyro_y_dps = (int16_t)sys_get_le16(&payload[6]),
+			.gyro_z_dps = (int16_t)sys_get_le16(&payload[8]),
+			.roll_deg = (int16_t)sys_get_le16(&payload[10]),
+			.pitch_deg = (int16_t)sys_get_le16(&payload[12]),
+			.yaw_deg = (int16_t)sys_get_le16(&payload[14]),
+			.flags = payload[16],
+			.heading_target_deg =
+				(int16_t)sys_get_le16(&payload[17]),
+			.heading_error_deg =
+				(int16_t)sys_get_le16(&payload[19]),
+			.heading_correction = (int8_t)payload[21],
+			.left_duty = (int8_t)payload[22],
+			.right_duty = (int8_t)payload[23],
+			.tracking_enabled = payload[24],
+		};
+		if (sample.tracking_enabled > 1U) {
+			LOG_WRN("Rejected TI telemetry tracking flag");
+		} else if (telemetry_handler != NULL) {
+			const int error = telemetry_handler(&sample);
+			if (error != 0) {
+				LOG_WRN("Telemetry forwarding failed: %d", error);
+			}
+		}
+	} else if (frame[3] == CAR_SERIAL_TYPE_ACK) {
+		LOG_INF("TI ACK seq=%u command=%u status=%u",
+			sequence, payload[0], payload[2]);
+	}
+}
+
 static void read_ti_uart(char *line, size_t *line_length, bool *overflow)
 {
 	unsigned char byte;
+	static uint8_t frame[CAR_SERIAL_MAX_FRAME_SIZE];
+	static size_t frame_length;
+	static size_t expected_frame_length;
 
 	while (uart_poll_in(ti_uart, &byte) == 0) {
+		if (frame_length > 0U || byte == CAR_SERIAL_SYNC_0) {
+			if (frame_length == 0U) {
+				frame[frame_length++] = byte;
+				continue;
+			}
+			if (frame_length == 1U && byte != CAR_SERIAL_SYNC_1) {
+				frame_length = byte == CAR_SERIAL_SYNC_0 ? 1U : 0U;
+				expected_frame_length = 0U;
+				continue;
+			}
+			if (frame_length < sizeof(frame)) {
+				frame[frame_length++] = byte;
+			} else {
+				frame_length = 0U;
+				expected_frame_length = 0U;
+				continue;
+			}
+			if (frame_length == CAR_SERIAL_HEADER_SIZE) {
+				if (frame[2] != CAR_SERIAL_VERSION ||
+				    !car_serial_payload_size_valid(frame[3],
+								   frame[4])) {
+					frame_length = 0U;
+					continue;
+				}
+				expected_frame_length =
+					car_serial_frame_size(frame[4]);
+			}
+			if (expected_frame_length > 0U &&
+			    frame_length == expected_frame_length) {
+				handle_ti_frame(frame, frame_length);
+				frame_length = 0U;
+				expected_frame_length = 0U;
+			}
+			continue;
+		}
+
 		if (byte == '\r') {
 			continue;
 		}
@@ -328,8 +432,6 @@ static void ti_uart_thread(void *unused1, void *unused2, void *unused3)
 	ARG_UNUSED(unused3);
 
 	k_thread_name_set(k_current_get(), "ti_uart");
-	ti_uart_write_line("ESP,READY,CAR_NODE,%d\r\n",
-			   CONFIG_TI_UART_BAUD_RATE);
 
 	while (true) {
 		struct car_command_event event;
@@ -356,8 +458,6 @@ static void ti_uart_thread(void *unused1, void *unused2, void *unused3)
 		}
 
 		if (now >= next_alive) {
-			ti_uart_write_line("ESP,ALIVE,%" PRIu32 "\r\n",
-					   k_uptime_get_32());
 			next_alive = now + CONFIG_TI_UART_STATUS_INTERVAL_MS;
 		}
 

@@ -29,27 +29,16 @@ cd F:\dsai26\zephyresp
 
 ## PC 到基站 ESP 协议
 
-PC 通过 COM17/CH343 以 `115200, 8N1` 发送 ASCII 行：
+PC 通过 COM17/CH343 以 `115200, 8N1` 发送二进制帧。帧包含 `A5 5A`
+同步头、版本、类型、负载长度、16 位序号、负载和 CRC16-CCITT。控制帧共
+11 字节，遥测帧共 34 字节；接收器可处理分包、粘包、错位和 CRC 错包。
 
-```text
-CAR,<sequence>,<command>,<speed>\n
-```
+命令编号为 0 STOP、1 FORWARD、2 BACKWARD、3 LEFT、4 RIGHT、
+5 TRACK_ON、6 TRACK_OFF。基站以二进制 ACK 回复。详细字节布局见
+`apps/espnow_peer/TI_UART_PROTOCOL.md`。
 
-例如：
-
-```text
-CAR,1,FORWARD,40
-CAR,2,LEFT,30
-CAR,3,STOP,0
-```
-
-基站 ESP 接收成功后回复：
-
-```text
-ESP,ACK,<sequence>,<command>,<speed>
-```
-
-命令格式错误或发送失败时回复 `ESP,NACK,...`。
+固件仍接受旧的 `CAR,<sequence>,<command>,<speed>` 文本行用于手工调试，
+但新版 GUI 默认只发送二进制帧。
 
 ## 命令行测试
 

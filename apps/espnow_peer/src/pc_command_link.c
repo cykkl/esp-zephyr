@@ -23,6 +23,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/printk.h>
 
+#include "car_serial_protocol.h"
+
 LOG_MODULE_REGISTER(pc_command_link, LOG_LEVEL_INF);
 
 #define PC_UART_NODE DT_CHOSEN(zephyr_console)
@@ -59,6 +61,65 @@ static void pc_write_line(const char *format, ...)
 		uart_poll_out(pc_uart, line[index]);
 	}
 	k_mutex_unlock(&pc_tx_mutex);
+}
+
+static void pc_write_bytes(const uint8_t *data, size_t length)
+{
+	k_mutex_lock(&pc_tx_mutex, K_FOREVER);
+	k_sched_lock();
+	for (size_t index = 0; index < length; ++index) {
+		uart_poll_out(pc_uart, data[index]);
+	}
+	k_sched_unlock();
+	k_mutex_unlock(&pc_tx_mutex);
+}
+
+static void send_binary_ack(uint16_t sequence, enum car_command command,
+			    uint8_t speed, uint8_t status)
+{
+	uint8_t payload[CAR_SERIAL_ACK_PAYLOAD_SIZE] = {
+		(uint8_t)command, speed, status
+	};
+	uint8_t frame[CAR_SERIAL_MAX_FRAME_SIZE];
+	const size_t length = car_serial_encode(
+		frame, sizeof(frame), CAR_SERIAL_TYPE_ACK, sequence,
+		payload, sizeof(payload));
+
+	if (length > 0U) {
+		pc_write_bytes(frame, length);
+	}
+}
+
+static void handle_pc_frame(const uint8_t *frame, size_t length)
+{
+	const uint16_t sequence = car_serial_sequence(frame);
+	const uint8_t *payload = car_serial_const_payload(frame);
+	const enum car_command command = (enum car_command)payload[0];
+	uint8_t speed = payload[1];
+
+	if (!car_serial_frame_valid(frame, length) ||
+	    frame[3] != CAR_SERIAL_TYPE_COMMAND ||
+	    command > CAR_COMMAND_TRACK_OFF || speed > CAR_MAX_SPEED ||
+	    (car_command_is_tracking(command) && speed != 0U) ||
+	    (command == CAR_COMMAND_STOP && speed != 0U)) {
+		send_binary_ack(sequence, command, speed,
+				CAR_SERIAL_ACK_BAD_COMMAND);
+		return;
+	}
+	if (command == CAR_COMMAND_STOP || car_command_is_tracking(command)) {
+		speed = 0U;
+	}
+	const int error = command_handler(sequence, command, speed);
+
+	send_binary_ack(sequence, command, speed,
+			error == 0 ? CAR_SERIAL_ACK_OK :
+				     CAR_SERIAL_ACK_QUEUE_FULL);
+	if (error == 0) {
+		LOG_INF("PC frame seq=%u %s speed=%u",
+			sequence, car_command_name(command), speed);
+	} else {
+		LOG_ERR("PC frame send failed: %d", error);
+	}
 }
 
 static bool parse_u16(const char *text, uint16_t *value)
@@ -157,6 +218,9 @@ static void pc_thread(void *unused1, void *unused2, void *unused3)
 	char line[PC_RX_LINE_SIZE];
 	size_t length = 0U;
 	bool overflow = false;
+	uint8_t frame[CAR_SERIAL_MAX_FRAME_SIZE];
+	size_t frame_length = 0U;
+	size_t expected_frame_length = 0U;
 
 	ARG_UNUSED(unused1);
 	ARG_UNUSED(unused2);
@@ -169,6 +233,42 @@ static void pc_thread(void *unused1, void *unused2, void *unused3)
 		unsigned char byte;
 
 		while (uart_poll_in(pc_uart, &byte) == 0) {
+			if (frame_length > 0U || byte == CAR_SERIAL_SYNC_0) {
+				if (frame_length == 0U) {
+					frame[frame_length++] = byte;
+					continue;
+				}
+				if (frame_length == 1U && byte != CAR_SERIAL_SYNC_1) {
+					frame_length = byte == CAR_SERIAL_SYNC_0 ? 1U : 0U;
+					expected_frame_length = 0U;
+					continue;
+				}
+				if (frame_length < sizeof(frame)) {
+					frame[frame_length++] = byte;
+				} else {
+					frame_length = 0U;
+					expected_frame_length = 0U;
+					continue;
+				}
+				if (frame_length == CAR_SERIAL_HEADER_SIZE) {
+					if (frame[2] != CAR_SERIAL_VERSION ||
+					    !car_serial_payload_size_valid(
+						    frame[3], frame[4])) {
+						frame_length = 0U;
+						continue;
+					}
+					expected_frame_length =
+						car_serial_frame_size(frame[4]);
+				}
+				if (expected_frame_length > 0U &&
+				    frame_length == expected_frame_length) {
+					handle_pc_frame(frame, frame_length);
+					frame_length = 0U;
+					expected_frame_length = 0U;
+				}
+				continue;
+			}
+
 			if (byte == '\r') {
 				continue;
 			}
@@ -193,18 +293,30 @@ static void pc_thread(void *unused1, void *unused2, void *unused3)
 
 		struct car_telemetry_sample telemetry;
 		while (k_msgq_get(&pc_telemetry, &telemetry, K_NO_WAIT) == 0) {
-			pc_write_line(
-				"CAR,TEL,%u,%" PRIu32 ",%d,%d,%d,%d,%d,%d,%u,"
-				"%d,%d,%d,%d,%d,%u\r\n",
-				telemetry.sequence, telemetry.uptime_ms,
-				telemetry.gyro_x_dps, telemetry.gyro_y_dps,
-				telemetry.gyro_z_dps, telemetry.roll_deg,
-				telemetry.pitch_deg, telemetry.yaw_deg,
-				telemetry.flags, telemetry.heading_target_deg,
-				telemetry.heading_error_deg,
-				telemetry.heading_correction,
-				telemetry.left_duty, telemetry.right_duty,
-				telemetry.tracking_enabled);
+			uint8_t payload[CAR_SERIAL_TELEMETRY_PAYLOAD_SIZE];
+			uint8_t frame_out[CAR_SERIAL_MAX_FRAME_SIZE];
+
+			sys_put_le32(telemetry.uptime_ms, &payload[0]);
+			sys_put_le16((uint16_t)telemetry.gyro_x_dps, &payload[4]);
+			sys_put_le16((uint16_t)telemetry.gyro_y_dps, &payload[6]);
+			sys_put_le16((uint16_t)telemetry.gyro_z_dps, &payload[8]);
+			sys_put_le16((uint16_t)telemetry.roll_deg, &payload[10]);
+			sys_put_le16((uint16_t)telemetry.pitch_deg, &payload[12]);
+			sys_put_le16((uint16_t)telemetry.yaw_deg, &payload[14]);
+			payload[16] = telemetry.flags;
+			sys_put_le16((uint16_t)telemetry.heading_target_deg,
+				     &payload[17]);
+			sys_put_le16((uint16_t)telemetry.heading_error_deg,
+				     &payload[19]);
+			payload[21] = (uint8_t)telemetry.heading_correction;
+			payload[22] = (uint8_t)telemetry.left_duty;
+			payload[23] = (uint8_t)telemetry.right_duty;
+			payload[24] = telemetry.tracking_enabled;
+			const size_t frame_size = car_serial_encode(
+				frame_out, sizeof(frame_out),
+				CAR_SERIAL_TYPE_TELEMETRY, telemetry.sequence,
+				payload, sizeof(payload));
+			pc_write_bytes(frame_out, frame_size);
 		}
 
 		k_sleep(K_MSEC(2));
