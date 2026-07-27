@@ -23,6 +23,7 @@
 #include <zephyr/sys/util.h>
 
 #include "car_control_protocol.h"
+#include "car_serial_protocol.h"
 #include "ti_uart_link.h"
 
 LOG_MODULE_REGISTER(imu_uart_link, LOG_LEVEL_INF);
@@ -234,11 +235,14 @@ static int configure_wit_sensor(void)
 	return 0;
 }
 
-static int16_t scale_axis(const uint8_t *raw, int32_t full_scale)
+/* 保留 JY61P 原始分辨率，并直接转换为串口协议使用的定点单位。 */
+static int16_t scale_axis(const uint8_t *raw, int32_t full_scale,
+			  int32_t fixed_point_scale)
 {
 	const int16_t value = (int16_t)sys_get_le16(raw);
 
-	return (int16_t)(((int32_t)value * full_scale) / 32768);
+	return (int16_t)(((int32_t)value * full_scale * fixed_point_scale) /
+			 32768);
 }
 
 static bool frame_checksum_valid(const uint8_t *data)
@@ -265,14 +269,18 @@ static void decode_frame(const uint8_t *data, int64_t now)
 	switch (data[1]) {
 	case WIT_FRAME_GYRO:
 		for (size_t axis = 0; axis < ARRAY_SIZE(gyro); axis++) {
-			gyro[axis] = scale_axis(&data[2U + axis * 2U], 2000);
+			gyro[axis] = scale_axis(
+				&data[2U + axis * 2U], 2000,
+				CAR_SERIAL_GYRO_SCALE);
 		}
 		gyro_time_ms = now;
 		gyro_received = true;
 		break;
 	case WIT_FRAME_ANGLE:
 		for (size_t axis = 0; axis < ARRAY_SIZE(angle); axis++) {
-			angle[axis] = scale_axis(&data[2U + axis * 2U], 180);
+			angle[axis] = scale_axis(
+				&data[2U + axis * 2U], 180,
+				CAR_SERIAL_ANGLE_SCALE);
 		}
 		angle_time_ms = now;
 		angle_received = true;
@@ -315,12 +323,12 @@ static void publish_sample(int64_t now)
 	};
 
 	if (gyro_fresh && angle_fresh) {
-		sample.gyro_x_dps = gyro[0];
-		sample.gyro_y_dps = gyro[1];
-		sample.gyro_z_dps = gyro[2];
-		sample.roll_deg = angle[0];
-		sample.pitch_deg = angle[1];
-		sample.yaw_deg = angle[2];
+		sample.gyro_x_dps_x10 = gyro[0];
+		sample.gyro_y_dps_x10 = gyro[1];
+		sample.gyro_z_dps_x10 = gyro[2];
+		sample.roll_cdeg = angle[0];
+		sample.pitch_cdeg = angle[1];
+		sample.yaw_cdeg = angle[2];
 		sample.flags = CAR_TELEMETRY_IMU_VALID;
 		checksum_error_seen = false;
 	} else {

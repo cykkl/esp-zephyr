@@ -31,7 +31,7 @@ WitMotion JY61P 使用车载 ESP 的 UART0，参数为 `115200 8N1`。从机 ESP
 | 偏移 | 长度 | 字段 |
 | ---: | ---: | --- |
 | 0 | 2 | 同步头 `A5 5A` |
-| 2 | 1 | 协议版本，当前为 `1` |
+| 2 | 1 | 协议版本，当前为 `2` |
 | 3 | 1 | 消息类型 |
 | 4 | 1 | 负载长度 |
 | 5 | 2 | 16 位序号 |
@@ -56,17 +56,20 @@ CRC 初值为 `0xFFFF`、多项式为 `0x1021`，计算范围从版本字段到�
 
 ### `0x02` IMU，负载 13 字节
 
-依次为 `gx/gy/gz/roll/pitch/yaw` 六个有符号 16 位整数，以及 1 字节 flags。
-flags bit0 表示有效，flags[7:2] 为故障码。
+依次为 `gx/gy/gz/roll/pitch/yaw` 六个有符号 16 位定点整数，以及 1 字节
+flags。角速度单位为 `0.1°/s`，姿态角单位为 `0.01°`；flags bit0 表示有效，
+flags[7:2] 为故障码。车载 ESP 在 80 ms 内没有同时收到新角速度帧和姿态角
+帧时撤销有效位，避免重复转发冻结数据。
 
 ### `0x03` TELEMETRY，负载 25 字节
 
 依次为：
 
 - `uptime_ms`：无符号 32 位；
-- `gx/gy/gz/roll/pitch/yaw`：六个有符号 16 位；
+- `gx/gy/gz`：三个有符号 16 位，单位 `0.1°/s`；
+- `roll/pitch/yaw`：三个有符号 16 位，单位 `0.01°`；
 - `flags`：1 字节；
-- `heading_target/heading_error`：两个有符号 16 位；
+- `heading_target/heading_error`：两个有符号 16 位，单位 `0.01°`；
 - `correction/left/right`：三个有符号 8 位；
 - `tracking`：0 或 1。
 

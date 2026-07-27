@@ -16,7 +16,7 @@
 
 #define CAR_SERIAL_SYNC_0 0xa5U
 #define CAR_SERIAL_SYNC_1 0x5aU
-#define CAR_SERIAL_VERSION 1U
+#define CAR_SERIAL_VERSION 2U
 #define CAR_SERIAL_HEADER_SIZE 7U
 #define CAR_SERIAL_CRC_SIZE 2U
 #define CAR_SERIAL_MAX_PAYLOAD 25U
@@ -37,6 +37,10 @@
 #define CAR_SERIAL_ACK_BAD_FRAME 1U
 #define CAR_SERIAL_ACK_BAD_COMMAND 2U
 #define CAR_SERIAL_ACK_QUEUE_FULL 3U
+
+/* IMU fixed-point units carried by IMU and TELEMETRY payloads. */
+#define CAR_SERIAL_GYRO_SCALE 10
+#define CAR_SERIAL_ANGLE_SCALE 100
 
 static inline uint16_t car_serial_crc16(const uint8_t *data, size_t length)
 {

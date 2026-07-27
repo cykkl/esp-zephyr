@@ -75,11 +75,13 @@ config IMU_UART_BAUD_RATE
 
 config IMU_UART_STALE_TIMEOUT_MS
 	int "IMU stale timeout in milliseconds"
-	range 100 2000
-	default 300
+	range 40 2000
+	default 80
 	help
 	  Report an IMU fault when valid gyro and angle frames are not both
-	  received within this interval.
+	  received within this interval. At 50 Hz, 80 ms tolerates a few
+	  missing frames without allowing stale heading data to be replayed
+	  to the TI controller for hundreds of milliseconds.
 
 endmenu
 

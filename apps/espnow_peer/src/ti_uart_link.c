@@ -139,12 +139,12 @@ static void send_imu_to_ti(const struct car_imu_sample *sample)
 	uint8_t payload[CAR_SERIAL_IMU_PAYLOAD_SIZE];
 	uint8_t frame[CAR_SERIAL_MAX_FRAME_SIZE];
 
-	sys_put_le16((uint16_t)sample->gyro_x_dps, &payload[0]);
-	sys_put_le16((uint16_t)sample->gyro_y_dps, &payload[2]);
-	sys_put_le16((uint16_t)sample->gyro_z_dps, &payload[4]);
-	sys_put_le16((uint16_t)sample->roll_deg, &payload[6]);
-	sys_put_le16((uint16_t)sample->pitch_deg, &payload[8]);
-	sys_put_le16((uint16_t)sample->yaw_deg, &payload[10]);
+	sys_put_le16((uint16_t)sample->gyro_x_dps_x10, &payload[0]);
+	sys_put_le16((uint16_t)sample->gyro_y_dps_x10, &payload[2]);
+	sys_put_le16((uint16_t)sample->gyro_z_dps_x10, &payload[4]);
+	sys_put_le16((uint16_t)sample->roll_cdeg, &payload[6]);
+	sys_put_le16((uint16_t)sample->pitch_cdeg, &payload[8]);
+	sys_put_le16((uint16_t)sample->yaw_cdeg, &payload[10]);
 	payload[12] = sample->flags;
 	const size_t length = car_serial_encode(
 		frame, sizeof(frame), CAR_SERIAL_TYPE_IMU, sample->sequence,
@@ -229,15 +229,15 @@ static bool parse_telemetry(char *line, struct car_telemetry_sample *sample)
 
 	if (!parse_unsigned_long(fields[0], UINT16_MAX, &sequence) ||
 	    !parse_unsigned_long(fields[1], UINT32_MAX, &uptime_ms) ||
-	    !parse_long(fields[2], INT16_MIN, INT16_MAX, &gyro_x) ||
-	    !parse_long(fields[3], INT16_MIN, INT16_MAX, &gyro_y) ||
-	    !parse_long(fields[4], INT16_MIN, INT16_MAX, &gyro_z) ||
-	    !parse_long(fields[5], INT16_MIN, INT16_MAX, &roll) ||
-	    !parse_long(fields[6], INT16_MIN, INT16_MAX, &pitch) ||
-	    !parse_long(fields[7], INT16_MIN, INT16_MAX, &yaw) ||
+	    !parse_long(fields[2], -2000, 2000, &gyro_x) ||
+	    !parse_long(fields[3], -2000, 2000, &gyro_y) ||
+	    !parse_long(fields[4], -2000, 2000, &gyro_z) ||
+	    !parse_long(fields[5], -180, 180, &roll) ||
+	    !parse_long(fields[6], -180, 180, &pitch) ||
+	    !parse_long(fields[7], -180, 180, &yaw) ||
 	    !parse_unsigned_long(fields[8], UINT8_MAX, &flags) ||
-	    !parse_long(fields[9], INT16_MIN, INT16_MAX, &target) ||
-	    !parse_long(fields[10], INT16_MIN, INT16_MAX, &error) ||
+	    !parse_long(fields[9], -180, 180, &target) ||
+	    !parse_long(fields[10], -180, 180, &error) ||
 	    !parse_long(fields[11], INT8_MIN, INT8_MAX, &correction) ||
 	    !parse_long(fields[12], INT8_MIN, INT8_MAX, &left) ||
 	    !parse_long(fields[13], INT8_MIN, INT8_MAX, &right) ||
@@ -248,15 +248,20 @@ static bool parse_telemetry(char *line, struct car_telemetry_sample *sample)
 	*sample = (struct car_telemetry_sample) {
 		.sequence = (uint16_t)sequence,
 		.uptime_ms = (uint32_t)uptime_ms,
-		.gyro_x_dps = (int16_t)gyro_x,
-		.gyro_y_dps = (int16_t)gyro_y,
-		.gyro_z_dps = (int16_t)gyro_z,
-		.roll_deg = (int16_t)roll,
-		.pitch_deg = (int16_t)pitch,
-		.yaw_deg = (int16_t)yaw,
+		.gyro_x_dps_x10 =
+			(int16_t)(gyro_x * CAR_SERIAL_GYRO_SCALE),
+		.gyro_y_dps_x10 =
+			(int16_t)(gyro_y * CAR_SERIAL_GYRO_SCALE),
+		.gyro_z_dps_x10 =
+			(int16_t)(gyro_z * CAR_SERIAL_GYRO_SCALE),
+		.roll_cdeg = (int16_t)(roll * CAR_SERIAL_ANGLE_SCALE),
+		.pitch_cdeg = (int16_t)(pitch * CAR_SERIAL_ANGLE_SCALE),
+		.yaw_cdeg = (int16_t)(yaw * CAR_SERIAL_ANGLE_SCALE),
 		.flags = (uint8_t)flags,
-		.heading_target_deg = (int16_t)target,
-		.heading_error_deg = (int16_t)error,
+		.heading_target_cdeg =
+			(int16_t)(target * CAR_SERIAL_ANGLE_SCALE),
+		.heading_error_cdeg =
+			(int16_t)(error * CAR_SERIAL_ANGLE_SCALE),
 		.heading_correction = (int8_t)correction,
 		.left_duty = (int8_t)left,
 		.right_duty = (int8_t)right,
@@ -320,16 +325,19 @@ static void handle_ti_frame(const uint8_t *frame, size_t length)
 		struct car_telemetry_sample sample = {
 			.sequence = sequence,
 			.uptime_ms = sys_get_le32(&payload[0]),
-			.gyro_x_dps = (int16_t)sys_get_le16(&payload[4]),
-			.gyro_y_dps = (int16_t)sys_get_le16(&payload[6]),
-			.gyro_z_dps = (int16_t)sys_get_le16(&payload[8]),
-			.roll_deg = (int16_t)sys_get_le16(&payload[10]),
-			.pitch_deg = (int16_t)sys_get_le16(&payload[12]),
-			.yaw_deg = (int16_t)sys_get_le16(&payload[14]),
+			.gyro_x_dps_x10 =
+				(int16_t)sys_get_le16(&payload[4]),
+			.gyro_y_dps_x10 =
+				(int16_t)sys_get_le16(&payload[6]),
+			.gyro_z_dps_x10 =
+				(int16_t)sys_get_le16(&payload[8]),
+			.roll_cdeg = (int16_t)sys_get_le16(&payload[10]),
+			.pitch_cdeg = (int16_t)sys_get_le16(&payload[12]),
+			.yaw_cdeg = (int16_t)sys_get_le16(&payload[14]),
 			.flags = payload[16],
-			.heading_target_deg =
+			.heading_target_cdeg =
 				(int16_t)sys_get_le16(&payload[17]),
-			.heading_error_deg =
+			.heading_error_cdeg =
 				(int16_t)sys_get_le16(&payload[19]),
 			.heading_correction = (int8_t)payload[21],
 			.left_duty = (int8_t)payload[22],

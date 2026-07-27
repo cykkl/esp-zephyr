@@ -27,7 +27,7 @@ COMMANDS = (
 )
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 FRAME_SYNC = b"\xA5\x5A"
-FRAME_VERSION = 1
+FRAME_VERSION = 2
 FRAME_TYPE_COMMAND = 1
 FRAME_TYPE_TELEMETRY = 3
 FRAME_TYPE_ACK = 4
@@ -1101,16 +1101,16 @@ class CarControllerApp:
         if len(parts) != 17:
             return False
         try:
-            gyro_x = int(parts[4])
-            gyro_y = int(parts[5])
-            gyro_z = int(parts[6])
-            roll = int(parts[7])
-            pitch = int(parts[8])
-            yaw = int(parts[9])
+            gyro_x = int(parts[4]) / 10.0
+            gyro_y = int(parts[5]) / 10.0
+            gyro_z = int(parts[6]) / 10.0
+            roll = int(parts[7]) / 100.0
+            pitch = int(parts[8]) / 100.0
+            yaw = int(parts[9]) / 100.0
             flags = int(parts[10])
             imu_fault = (flags >> 2) & 0x3F
-            target = int(parts[11])
-            error = int(parts[12])
+            target = int(parts[11]) / 100.0
+            error = int(parts[12]) / 100.0
             correction = int(parts[13])
             tracking_enabled = int(parts[16])
         except ValueError:
@@ -1122,12 +1122,12 @@ class CarControllerApp:
         self.last_radio_rx = now
         self.last_telemetry_rx = now
         if flags & 0x01:
-            self.gyro_x_var.set(f"{gyro_x:+d}°/s")
-            self.gyro_y_var.set(f"{gyro_y:+d}°/s")
-            self.gyro_z_var.set(f"{gyro_z:+d}°/s")
-            self.roll_var.set(f"{roll:+d}°")
-            self.pitch_var.set(f"{pitch:+d}°")
-            self.yaw_var.set(f"{yaw:+d}°")
+            self.gyro_x_var.set(f"{gyro_x:+.1f}°/s")
+            self.gyro_y_var.set(f"{gyro_y:+.1f}°/s")
+            self.gyro_z_var.set(f"{gyro_z:+.1f}°/s")
+            self.roll_var.set(f"{roll:+.2f}°")
+            self.pitch_var.set(f"{pitch:+.2f}°")
+            self.yaw_var.set(f"{yaw:+.2f}°")
             self._set_imu_status("IMU LIVE", self.LIME)
             if self.last_imu_valid is False:
                 self._append_log("CAR IMU RECOVERED", "ack")
@@ -1149,7 +1149,7 @@ class CarControllerApp:
 
         if flags & 0x02:
             self.heading_var.set(
-                f"LOCK {target:+d}°  E{error:+d}  C{correction:+d}"
+                f"LOCK {target:+.2f}°  E{error:+.2f}°  C{correction:+d}"
             )
         else:
             self.heading_var.set("FREE")

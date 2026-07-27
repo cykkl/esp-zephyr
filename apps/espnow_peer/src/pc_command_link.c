@@ -297,16 +297,22 @@ static void pc_thread(void *unused1, void *unused2, void *unused3)
 			uint8_t frame_out[CAR_SERIAL_MAX_FRAME_SIZE];
 
 			sys_put_le32(telemetry.uptime_ms, &payload[0]);
-			sys_put_le16((uint16_t)telemetry.gyro_x_dps, &payload[4]);
-			sys_put_le16((uint16_t)telemetry.gyro_y_dps, &payload[6]);
-			sys_put_le16((uint16_t)telemetry.gyro_z_dps, &payload[8]);
-			sys_put_le16((uint16_t)telemetry.roll_deg, &payload[10]);
-			sys_put_le16((uint16_t)telemetry.pitch_deg, &payload[12]);
-			sys_put_le16((uint16_t)telemetry.yaw_deg, &payload[14]);
+			sys_put_le16((uint16_t)telemetry.gyro_x_dps_x10,
+				     &payload[4]);
+			sys_put_le16((uint16_t)telemetry.gyro_y_dps_x10,
+				     &payload[6]);
+			sys_put_le16((uint16_t)telemetry.gyro_z_dps_x10,
+				     &payload[8]);
+			sys_put_le16((uint16_t)telemetry.roll_cdeg,
+				     &payload[10]);
+			sys_put_le16((uint16_t)telemetry.pitch_cdeg,
+				     &payload[12]);
+			sys_put_le16((uint16_t)telemetry.yaw_cdeg,
+				     &payload[14]);
 			payload[16] = telemetry.flags;
-			sys_put_le16((uint16_t)telemetry.heading_target_deg,
+			sys_put_le16((uint16_t)telemetry.heading_target_cdeg,
 				     &payload[17]);
-			sys_put_le16((uint16_t)telemetry.heading_error_deg,
+			sys_put_le16((uint16_t)telemetry.heading_error_cdeg,
 				     &payload[19]);
 			payload[21] = (uint8_t)telemetry.heading_correction;
 			payload[22] = (uint8_t)telemetry.left_duty;
