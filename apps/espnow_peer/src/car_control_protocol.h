@@ -40,7 +40,15 @@ enum car_command {
 	CAR_COMMAND_BACKWARD = 2,
 	CAR_COMMAND_LEFT = 3,
 	CAR_COMMAND_RIGHT = 4,
+	CAR_COMMAND_TRACK_ON = 5,
+	CAR_COMMAND_TRACK_OFF = 6,
 };
+
+static inline bool car_command_is_tracking(enum car_command command)
+{
+	return command == CAR_COMMAND_TRACK_ON ||
+	       command == CAR_COMMAND_TRACK_OFF;
+}
 
 struct __packed car_control_packet {
 	uint8_t magic[4];
@@ -67,6 +75,7 @@ struct car_telemetry_sample {
 	int8_t heading_correction;
 	int8_t left_duty;
 	int8_t right_duty;
+	uint8_t tracking_enabled;
 };
 
 /* 车载 ESP 从维特 IMU 解码后，通过现有 ESP->3507 串口发送的姿态样本。 */
@@ -99,6 +108,7 @@ struct __packed car_telemetry_packet {
 	int8_t heading_correction;
 	int8_t left_duty;
 	int8_t right_duty;
+	uint8_t tracking_enabled;
 	uint8_t crc_le[2];
 };
 
@@ -131,7 +141,10 @@ static inline void car_control_packet_init(struct car_control_packet *packet,
 	packet->type = CAR_PACKET_TYPE_COMMAND;
 	sys_put_le16(sequence, packet->sequence_le);
 	packet->command = (uint8_t)command;
-	packet->speed = command == CAR_COMMAND_STOP ? 0U : MIN(speed, CAR_MAX_SPEED);
+	packet->speed =
+		command == CAR_COMMAND_STOP || car_command_is_tracking(command)
+			? 0U
+			: MIN(speed, CAR_MAX_SPEED);
 
 	const uint16_t crc =
 		car_crc16_ccitt((const uint8_t *)packet,
@@ -148,8 +161,10 @@ static inline bool car_control_packet_is_valid(
 	if (memcmp(packet->magic, magic, sizeof(packet->magic)) != 0 ||
 	    packet->version != CAR_PACKET_VERSION ||
 	    packet->type != CAR_PACKET_TYPE_COMMAND ||
-	    packet->command > CAR_COMMAND_RIGHT ||
-	    packet->speed > CAR_MAX_SPEED) {
+	    packet->command > CAR_COMMAND_TRACK_OFF ||
+	    packet->speed > CAR_MAX_SPEED ||
+	    (car_command_is_tracking((enum car_command)packet->command) &&
+	     packet->speed != 0U)) {
 		return false;
 	}
 
@@ -192,6 +207,7 @@ static inline void car_telemetry_packet_init(
 	packet->heading_correction = sample->heading_correction;
 	packet->left_duty = sample->left_duty;
 	packet->right_duty = sample->right_duty;
+	packet->tracking_enabled = sample->tracking_enabled != 0U ? 1U : 0U;
 
 	const uint16_t crc =
 		car_crc16_ccitt((const uint8_t *)packet,
@@ -206,7 +222,8 @@ static inline bool car_telemetry_packet_is_valid(
 
 	if (memcmp(packet->magic, magic, sizeof(packet->magic)) != 0 ||
 	    packet->version != CAR_PACKET_VERSION ||
-	    packet->type != CAR_PACKET_TYPE_TELEMETRY) {
+	    packet->type != CAR_PACKET_TYPE_TELEMETRY ||
+	    packet->tracking_enabled > 1U) {
 		return false;
 	}
 
@@ -263,6 +280,7 @@ static inline void car_telemetry_packet_decode(
 		.heading_correction = packet->heading_correction,
 		.left_duty = packet->left_duty,
 		.right_duty = packet->right_duty,
+		.tracking_enabled = packet->tracking_enabled,
 	};
 }
 
@@ -279,6 +297,10 @@ static inline const char *car_command_name(enum car_command command)
 		return "LEFT";
 	case CAR_COMMAND_RIGHT:
 		return "RIGHT";
+	case CAR_COMMAND_TRACK_ON:
+		return "TRACK_ON";
+	case CAR_COMMAND_TRACK_OFF:
+		return "TRACK_OFF";
 	default:
 		return "INVALID";
 	}

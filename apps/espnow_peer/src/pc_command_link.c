@@ -2,7 +2,7 @@
  * PC serial command input for the base ESP.
  *
  * Input format:
- *   CAR,<sequence>,<STOP|FORWARD|BACKWARD|LEFT|RIGHT>,<speed>\n
+ *   CAR,<sequence>,<STOP|FORWARD|BACKWARD|LEFT|RIGHT|TRACK_ON|TRACK_OFF>,<speed>\n
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -102,6 +102,10 @@ static bool parse_command(const char *text, enum car_command *command)
 		*command = CAR_COMMAND_LEFT;
 	} else if (strcmp(text, "RIGHT") == 0) {
 		*command = CAR_COMMAND_RIGHT;
+	} else if (strcmp(text, "TRACK_ON") == 0) {
+		*command = CAR_COMMAND_TRACK_ON;
+	} else if (strcmp(text, "TRACK_OFF") == 0) {
+		*command = CAR_COMMAND_TRACK_OFF;
 	} else {
 		return false;
 	}
@@ -131,7 +135,7 @@ static void handle_pc_line(char *line)
 		return;
 	}
 
-	if (command == CAR_COMMAND_STOP) {
+	if (command == CAR_COMMAND_STOP || car_command_is_tracking(command)) {
 		speed = 0U;
 	}
 
@@ -191,7 +195,7 @@ static void pc_thread(void *unused1, void *unused2, void *unused3)
 		while (k_msgq_get(&pc_telemetry, &telemetry, K_NO_WAIT) == 0) {
 			pc_write_line(
 				"CAR,TEL,%u,%" PRIu32 ",%d,%d,%d,%d,%d,%d,%u,"
-				"%d,%d,%d,%d,%d\r\n",
+				"%d,%d,%d,%d,%d,%u\r\n",
 				telemetry.sequence, telemetry.uptime_ms,
 				telemetry.gyro_x_dps, telemetry.gyro_y_dps,
 				telemetry.gyro_z_dps, telemetry.roll_deg,
@@ -199,7 +203,8 @@ static void pc_thread(void *unused1, void *unused2, void *unused3)
 				telemetry.flags, telemetry.heading_target_deg,
 				telemetry.heading_error_deg,
 				telemetry.heading_correction,
-				telemetry.left_duty, telemetry.right_duty);
+				telemetry.left_duty, telemetry.right_duty,
+				telemetry.tracking_enabled);
 		}
 
 		k_sleep(K_MSEC(2));

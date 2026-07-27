@@ -48,6 +48,16 @@ CAR,CMD,11,LEFT,25\r\n
 CAR,CMD,14,STOP,0\r\n
 ```
 
+循迹模式使用独立消息，不受手动控制 700 ms 失联停车计时影响：
+
+```text
+CAR,TRACK,<sequence>,<ON|OFF>\r\n
+```
+
+- `ON`：退出远程手动模式、使能电机并进入七路传感器自动循迹。
+- `OFF`：退出循迹并立即清零左右轮输出、取消电机使能。
+- PC 窗口失焦、紧急停车或方向键接管时会自动发送 `OFF`。
+
 MSPM0 成功入队后返回：
 
 ```text
@@ -94,7 +104,7 @@ MSPM0 每 200 ms 向车载 ESP 发送：
 
 ```text
 CAR,TEL,<seq>,<ms>,<gx>,<gy>,<gz>,<roll>,<pitch>,<yaw>,<flags>,
-        <target>,<error>,<correction>,<left>,<right>
+        <target>,<error>,<correction>,<left>,<right>,<tracking>
 ```
 
 - `gx/gy/gz`：JY61P 三轴角速度，单位 °/s。
@@ -104,6 +114,7 @@ CAR,TEL,<seq>,<ms>,<gx>,<gy>,<gz>,<roll>,<pitch>,<yaw>,<flags>,
   2=设备无响应、3=接收超时、4=数据过期、5=校验或其他I/O错误。
 - `target/error/correction`：目标航向、航向误差和左右轮差速修正。
 - `left/right`：MSPM0 最终输出的左右轮 PWM 百分比。
+- `tracking`：`1` 表示 TI 当前处于自动循迹模式，`0` 表示关闭。
 
 车载 ESP 校验并解析该行，转换为带 CRC16 的二进制 ESP-NOW 遥测包。基站
 ESP 校验无线包后再以同样的 `CAR,TEL` 文本行发给 PC，PC 控制界面实时显示

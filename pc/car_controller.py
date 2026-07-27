@@ -15,7 +15,15 @@ from tkinter import messagebox
 import serial
 
 
-COMMANDS = ("STOP", "FORWARD", "BACKWARD", "LEFT", "RIGHT")
+COMMANDS = (
+    "STOP",
+    "FORWARD",
+    "BACKWARD",
+    "LEFT",
+    "RIGHT",
+    "TRACK_ON",
+    "TRACK_OFF",
+)
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -74,7 +82,11 @@ class EspSerialLink:
         if not self.connected:
             raise serial.SerialException("Serial port is not connected")
 
-        speed = 0 if command == "STOP" else max(0, min(int(speed), 100))
+        speed = (
+            0
+            if command in ("STOP", "TRACK_ON", "TRACK_OFF")
+            else max(0, min(int(speed), 100))
+        )
         sequence = self.sequence
         self.sequence = (self.sequence + 1) & 0xFFFF
         message = f"CAR,{sequence},{command},{speed}\n".encode("ascii")
@@ -203,6 +215,7 @@ class SpeedGauge(tk.Canvas):
 
 class CarControllerApp:
     REPEAT_MS = 200
+    TELEMETRY_TIMEOUT_S = 0.8
 
     BG = "#edf3f8"
     PANEL = "#ffffff"
@@ -232,6 +245,7 @@ class CarControllerApp:
         self.last_telemetry_rx = 0.0
         self.last_imu_valid: bool | None = None
         self.last_imu_fault: int | None = None
+        self.tracking_enabled = False
         self.movement_buttons: list[tk.Button] = []
 
         root.title("APEX // ESP-NOW VEHICLE CONTROL")
@@ -255,9 +269,15 @@ class CarControllerApp:
         self.command_var = tk.StringVar(value="STOP")
         self.vector_var = tk.StringVar(value="VEHICLE SAFE")
         self.ack_var = tk.StringVar(value="NO ACK")
+        self.gyro_x_var = tk.StringVar(value="--°/s")
+        self.gyro_y_var = tk.StringVar(value="--°/s")
+        self.gyro_z_var = tk.StringVar(value="--°/s")
+        self.roll_var = tk.StringVar(value="--°")
+        self.pitch_var = tk.StringVar(value="--°")
         self.yaw_var = tk.StringVar(value="--°")
-        self.gyro_var = tk.StringVar(value="--°/s")
+        self.imu_status_var = tk.StringVar(value="IMU OFFLINE")
         self.heading_var = tk.StringVar(value="FREE")
+        self.tracking_var = tk.StringVar(value="开启循迹  //  OFF")
         self.speed_var = tk.IntVar(value=40)
 
         self._build_ui()
@@ -266,6 +286,7 @@ class CarControllerApp:
         self.root.after(100, self._poll_logs)
         self.root.after(self.REPEAT_MS, self._repeat_command)
         self.root.after(400, self._refresh_radio_state)
+        self.root.after(250, self._refresh_telemetry_state)
 
     def _build_ui(self) -> None:
         tk.Frame(self.root, bg=self.MAGENTA, height=4).pack(fill="x")
@@ -381,6 +402,7 @@ class CarControllerApp:
         self._build_drive_panel(drive_panel)
         self._build_power_panel(power_panel)
 
+        self._build_imu_panel()
         self._build_log_panel()
 
     def _make_panel(self, parent: tk.Widget) -> tk.Frame:
@@ -435,6 +457,24 @@ class CarControllerApp:
             fg=self.MUTED,
             font=("Bahnschrift", 10),
         ).pack(side="left", padx=14, pady=(12, 0))
+        self.tracking_button = tk.Button(
+            state,
+            textvariable=self.tracking_var,
+            command=self.toggle_tracking,
+            bg=self.PANEL_ALT,
+            fg=self.ORANGE,
+            activebackground=self.ORANGE,
+            activeforeground="#ffffff",
+            disabledforeground="#aab8c7",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=10,
+        )
+        self.tracking_button.pack(side="right")
+        self.movement_buttons.append(self.tracking_button)
 
         pad = tk.Frame(panel, bg=self.PANEL)
         pad.pack(pady=(2, 8))
@@ -576,14 +616,8 @@ class CarControllerApp:
 
         telemetry = tk.Frame(panel, bg=self.PANEL_ALT)
         telemetry.pack(fill="x", padx=24, pady=(4, 18))
-        self._metric(telemetry, "YAW", self.yaw_var, self.CYAN).pack(
-            side="left", fill="both", expand=True, padx=(0, 1)
-        )
-        self._metric(telemetry, "GYRO Z", self.gyro_var, self.MAGENTA).pack(
-            side="left", fill="both", expand=True, padx=1
-        )
         self._metric(telemetry, "HEADING", self.heading_var, self.ORANGE).pack(
-            side="left", fill="both", expand=True, padx=1
+            side="left", fill="both", expand=True, padx=(0, 1)
         )
         self._metric(telemetry, "LAST ACK", self.ack_var, self.LIME).pack(
             side="left", fill="both", expand=True, padx=(1, 0)
@@ -617,6 +651,52 @@ class CarControllerApp:
         ).pack(anchor="w")
         return frame
 
+    def _build_imu_panel(self) -> None:
+        shell = tk.Frame(
+            self.root,
+            bg=self.PANEL,
+            highlightbackground=self.EDGE,
+            highlightthickness=1,
+        )
+        shell.pack(fill="x", padx=28, pady=(0, 12))
+
+        bar = tk.Frame(shell, bg=self.PANEL_ALT)
+        bar.pack(fill="x")
+        tk.Label(
+            bar,
+            text="03  //  IMU LIVE DATA",
+            bg=self.PANEL_ALT,
+            fg=self.MAGENTA,
+            font=("Bahnschrift SemiBold", 9),
+        ).pack(side="left", padx=12, pady=7)
+        self.imu_status_label = tk.Label(
+            bar,
+            textvariable=self.imu_status_var,
+            bg=self.PANEL_ALT,
+            fg=self.MUTED,
+            font=("Bahnschrift SemiBold", 9),
+        )
+        self.imu_status_label.pack(side="right", padx=12)
+
+        metrics = tk.Frame(shell, bg=self.PANEL_ALT)
+        metrics.pack(fill="x", padx=12, pady=(0, 10))
+        imu_metrics = (
+            ("GYRO X", self.gyro_x_var, self.CYAN),
+            ("GYRO Y", self.gyro_y_var, self.CYAN),
+            ("GYRO Z", self.gyro_z_var, self.CYAN),
+            ("ROLL", self.roll_var, self.MAGENTA),
+            ("PITCH", self.pitch_var, self.MAGENTA),
+            ("YAW", self.yaw_var, self.MAGENTA),
+        )
+        for index, (label, value, accent) in enumerate(imu_metrics):
+            metric = self._metric(metrics, label, value, accent)
+            metric.pack(
+                side="left",
+                fill="both",
+                expand=True,
+                padx=(0 if index == 0 else 1, 0 if index == 5 else 1),
+            )
+
     def _build_log_panel(self) -> None:
         shell = tk.Frame(self.root, bg=self.BG)
         shell.pack(fill="both", padx=28, pady=(0, 20))
@@ -624,7 +704,7 @@ class CarControllerApp:
         bar.pack(fill="x")
         tk.Label(
             bar,
-            text="03  //  LIVE TELEMETRY",
+            text="04  //  LINK LOG",
             bg=self.PANEL_ALT,
             fg=self.CYAN,
             font=("Bahnschrift SemiBold", 9),
@@ -639,7 +719,7 @@ class CarControllerApp:
 
         self.log = tk.Text(
             shell,
-            height=8,
+            height=4,
             bg="#f9fbfd",
             fg=self.MUTED,
             insertbackground=self.CYAN,
@@ -714,6 +794,8 @@ class CarControllerApp:
         if connected:
             self.status_var.set(f"BASE {self.link.port}")
             self.base_dot.itemconfigure(self.base_dot_item, fill=self.LIME)
+            self._set_imu_status("IMU WAITING", self.ORANGE)
+            self._set_tracking_visual(False)
             self.connect_button.configure(
                 text="DISCONNECT",
                 bg=self.MAGENTA,
@@ -735,6 +817,14 @@ class CarControllerApp:
             self.command_var.set("STOP")
             self.vector_var.set("VEHICLE SAFE")
             self.ack_var.set("NO ACK")
+            self.heading_var.set("FREE")
+            self.last_telemetry_rx = 0.0
+            self.last_imu_valid = None
+            self.last_imu_fault = None
+            self.tracking_enabled = False
+            self._clear_imu_values()
+            self._set_imu_status("IMU OFFLINE", self.MUTED)
+            self._set_tracking_visual(False)
 
         for button in self.movement_buttons:
             button.configure(state="normal" if connected else "disabled")
@@ -742,6 +832,8 @@ class CarControllerApp:
     def move(self, command: str) -> None:
         if not self.link.connected or command == self.current_command:
             return
+        if self.tracking_enabled:
+            self._send_tracking(False)
         self.current_command = command
         self.command_var.set(command)
         self.vector_var.set(f"VECTOR LOCKED  /  {self.speed_var.get():02d}%")
@@ -752,12 +844,61 @@ class CarControllerApp:
             self.stop()
 
     def stop(self) -> None:
+        if self.tracking_enabled and self.link.connected:
+            self._send_tracking(False)
         was_moving = self.current_command != "STOP"
         self.current_command = "STOP"
         self.command_var.set("STOP")
         self.vector_var.set("VEHICLE SAFE")
         if was_moving:
             self._send_current()
+
+    def toggle_tracking(self) -> None:
+        if not self.link.connected:
+            return
+        enable = not self.tracking_enabled
+        if enable and self.current_command != "STOP":
+            self.stop()
+        self._send_tracking(enable)
+
+    def _send_tracking(self, enabled: bool) -> None:
+        try:
+            command = "TRACK_ON" if enabled else "TRACK_OFF"
+            sequence = self.link.send_command(command, 0)
+            self.tracking_enabled = enabled
+            self._set_tracking_visual(enabled)
+            if enabled:
+                self.command_var.set("TRACK")
+                self.vector_var.set("LINE FOLLOWING ACTIVE")
+            else:
+                self.command_var.set("STOP")
+                self.vector_var.set("VEHICLE SAFE")
+            self._append_log(
+                f"[PC TX] seq={sequence:05d}  {command}", "tx"
+            )
+        except (OSError, serial.SerialException) as error:
+            self._append_log(f"[SERIAL ERROR] {error}", "error")
+            self.link.disconnect()
+            self._set_connected_visual(False)
+
+    def _set_tracking_visual(self, enabled: bool) -> None:
+        self.tracking_enabled = enabled
+        if enabled:
+            self.tracking_var.set("循迹开启  //  点击关闭")
+            self.tracking_button.configure(
+                bg=self.LIME,
+                fg="#ffffff",
+                activebackground="#7fbe38",
+                activeforeground="#ffffff",
+            )
+        else:
+            self.tracking_var.set("循迹关闭  //  点击开启")
+            self.tracking_button.configure(
+                bg=self.PANEL_ALT,
+                fg=self.ORANGE,
+                activebackground=self.ORANGE,
+                activeforeground="#ffffff",
+            )
 
     def _speed_changed(self, value: str) -> None:
         speed = int(float(value))
@@ -827,25 +968,37 @@ class CarControllerApp:
     def _update_telemetry(self, line: str) -> bool:
         """解析基站 ESP 转发的 IMU/航向遥测并刷新仪表。"""
         parts = line.split(",")
-        if len(parts) != 16:
+        if len(parts) != 17:
             return False
         try:
+            gyro_x = int(parts[4])
+            gyro_y = int(parts[5])
             gyro_z = int(parts[6])
+            roll = int(parts[7])
+            pitch = int(parts[8])
             yaw = int(parts[9])
             flags = int(parts[10])
             imu_fault = (flags >> 2) & 0x3F
             target = int(parts[11])
             error = int(parts[12])
             correction = int(parts[13])
+            tracking_enabled = int(parts[16])
         except ValueError:
+            return False
+        if tracking_enabled not in (0, 1):
             return False
 
         now = time.monotonic()
         self.last_radio_rx = now
         self.last_telemetry_rx = now
         if flags & 0x01:
+            self.gyro_x_var.set(f"{gyro_x:+d}°/s")
+            self.gyro_y_var.set(f"{gyro_y:+d}°/s")
+            self.gyro_z_var.set(f"{gyro_z:+d}°/s")
+            self.roll_var.set(f"{roll:+d}°")
+            self.pitch_var.set(f"{pitch:+d}°")
             self.yaw_var.set(f"{yaw:+d}°")
-            self.gyro_var.set(f"{gyro_z:+d}°/s")
+            self._set_imu_status("IMU LIVE", self.LIME)
             if self.last_imu_valid is False:
                 self._append_log("CAR IMU RECOVERED", "ack")
             self.last_imu_valid = True
@@ -854,8 +1007,8 @@ class CarControllerApp:
             fault_name = self.IMU_FAULT_NAMES.get(
                 imu_fault, f"UNKNOWN {imu_fault}"
             )
-            self.yaw_var.set("IMU ERROR")
-            self.gyro_var.set(fault_name)
+            self._clear_imu_values()
+            self._set_imu_status(f"IMU ERROR  //  {fault_name}", self.DANGER)
             if self.last_imu_valid is not False or \
                     imu_fault != self.last_imu_fault:
                 self._append_log(
@@ -870,7 +1023,44 @@ class CarControllerApp:
             )
         else:
             self.heading_var.set("FREE")
+        self._set_tracking_visual(bool(tracking_enabled))
+        if tracking_enabled and self.current_command == "STOP":
+            self.command_var.set("TRACK")
+            self.vector_var.set("LINE FOLLOWING ACTIVE")
+        elif not tracking_enabled and self.command_var.get() == "TRACK":
+            self.command_var.set("STOP")
+            self.vector_var.set("VEHICLE SAFE")
         return True
+
+    def _clear_imu_values(self) -> None:
+        self.gyro_x_var.set("--°/s")
+        self.gyro_y_var.set("--°/s")
+        self.gyro_z_var.set("--°/s")
+        self.roll_var.set("--°")
+        self.pitch_var.set("--°")
+        self.yaw_var.set("--°")
+
+    def _set_imu_status(self, text: str, color: str) -> None:
+        self.imu_status_var.set(text)
+        self.imu_status_label.configure(fg=color)
+
+    def _refresh_telemetry_state(self) -> None:
+        if not self.link.connected:
+            self._set_imu_status("IMU OFFLINE", self.MUTED)
+        elif self.last_telemetry_rx == 0.0:
+            self._set_imu_status("IMU WAITING", self.ORANGE)
+        elif (
+            time.monotonic() - self.last_telemetry_rx
+            > self.TELEMETRY_TIMEOUT_S
+        ):
+            if self.imu_status_var.get() != "IMU STALE":
+                self._clear_imu_values()
+                self.heading_var.set("FREE")
+                self._set_imu_status("IMU STALE", self.DANGER)
+                self._append_log(
+                    "[TELEMETRY] No fresh IMU data for 800 ms", "error"
+                )
+        self.root.after(250, self._refresh_telemetry_state)
 
     def _refresh_radio_state(self) -> None:
         active = (
@@ -939,7 +1129,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument(
         "--command",
-        choices=("forward", "backward", "left", "right", "stop"),
+        choices=(
+            "forward",
+            "backward",
+            "left",
+            "right",
+            "stop",
+            "track_on",
+            "track_off",
+        ),
         help="Run without the GUI and send one command repeatedly.",
     )
     parser.add_argument("--speed", type=int, default=40)

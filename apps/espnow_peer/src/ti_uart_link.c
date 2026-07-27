@@ -89,6 +89,16 @@ static void ti_uart_write_line(const char *format, ...)
 static void send_command_to_ti(uint16_t sequence, enum car_command command,
 			       uint8_t speed)
 {
+	if (car_command_is_tracking(command)) {
+		const bool enabled = command == CAR_COMMAND_TRACK_ON;
+
+		ti_uart_write_line("CAR,TRACK,%u,%s\r\n",
+				   sequence, enabled ? "ON" : "OFF");
+		LOG_INF("TI tracking seq=%u %s",
+			sequence, enabled ? "ON" : "OFF");
+		return;
+	}
+
 	if (command == CAR_COMMAND_STOP) {
 		speed = 0U;
 	}
@@ -159,7 +169,7 @@ static bool parse_unsigned_long(const char *text, unsigned long maximum,
 static bool parse_telemetry(char *line, struct car_telemetry_sample *sample)
 {
 	char *save;
-	char *fields[14];
+	char *fields[15];
 
 	char *token = strtok_r(line, ",", &save);
 	if (token == NULL || strcmp(token, "CAR") != 0) {
@@ -193,6 +203,7 @@ static bool parse_telemetry(char *line, struct car_telemetry_sample *sample)
 	long correction;
 	long left;
 	long right;
+	unsigned long tracking_enabled;
 
 	if (!parse_unsigned_long(fields[0], UINT16_MAX, &sequence) ||
 	    !parse_unsigned_long(fields[1], UINT32_MAX, &uptime_ms) ||
@@ -207,7 +218,8 @@ static bool parse_telemetry(char *line, struct car_telemetry_sample *sample)
 	    !parse_long(fields[10], INT16_MIN, INT16_MAX, &error) ||
 	    !parse_long(fields[11], INT8_MIN, INT8_MAX, &correction) ||
 	    !parse_long(fields[12], INT8_MIN, INT8_MAX, &left) ||
-	    !parse_long(fields[13], INT8_MIN, INT8_MAX, &right)) {
+	    !parse_long(fields[13], INT8_MIN, INT8_MAX, &right) ||
+	    !parse_unsigned_long(fields[14], 1U, &tracking_enabled)) {
 		return false;
 	}
 
@@ -226,6 +238,7 @@ static bool parse_telemetry(char *line, struct car_telemetry_sample *sample)
 		.heading_correction = (int8_t)correction,
 		.left_duty = (int8_t)left,
 		.right_duty = (int8_t)right,
+		.tracking_enabled = (uint8_t)tracking_enabled,
 	};
 	return true;
 }
@@ -399,7 +412,8 @@ int ti_uart_link_send_car_command(uint16_t sequence,
 		return -EAGAIN;
 	}
 
-	if (command > CAR_COMMAND_RIGHT || speed > CAR_MAX_SPEED) {
+	if (command > CAR_COMMAND_TRACK_OFF || speed > CAR_MAX_SPEED ||
+	    (car_command_is_tracking(command) && speed != 0U)) {
 		return -EINVAL;
 	}
 
