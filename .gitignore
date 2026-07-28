@@ -4,3 +4,15 @@
 *.log
 __pycache__/
 *.pyc
+
+# Local Zephyr build and flash helpers
+/scripts/build.ps1
+/scripts/build-flash.ps1
+/scripts/build-espnow.ps1
+/scripts/flash.ps1
+/scripts/flash-espnow-pair.ps1
+/scripts/zephyr-common.ps1
+/scripts/monitor.ps1
+/scripts/start-car-controller.ps1
+/README.md
+/README.md
